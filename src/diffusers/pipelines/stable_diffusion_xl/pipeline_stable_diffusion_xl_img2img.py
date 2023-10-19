@@ -547,14 +547,8 @@ class StableDiffusionXLImg2ImgPipeline(
         # Strength is irrelevant if we directly request a timestep to start at;
         # that is, strength is determined by the denoising_start instead.
         if denoising_start is not None:
-            discrete_timestep_cutoff = int(
-                round(
-                    self.scheduler.config.num_train_timesteps
-                    - (denoising_start * self.scheduler.config.num_train_timesteps)
-                )
-            )
-            timesteps = list(filter(lambda ts: ts < discrete_timestep_cutoff, timesteps))
-            return torch.tensor(timesteps), len(timesteps)
+            timesteps = timesteps[int(round(len(timesteps) * denoising_start)):]
+            return timesteps, len(timesteps)
 
         return timesteps, num_inference_steps - t_start
 
