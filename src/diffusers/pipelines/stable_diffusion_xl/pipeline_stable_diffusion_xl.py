@@ -811,13 +811,14 @@ class StableDiffusionXLPipeline(DiffusionPipeline, FromSingleFileMixin, LoraLoad
 
         # 7.1 Apply denoising_end
         if denoising_end is not None and isinstance(denoising_end, float) and denoising_end > 0 and denoising_end < 1:
-            discrete_timestep_cutoff = int(
+            num_inference_steps = int(
                 round(
-                    self.scheduler.config.num_train_timesteps
-                    - (denoising_end * self.scheduler.config.num_train_timesteps)
+                 (denoising_end * len(timesteps))
                 )
             )
-            num_inference_steps = len(list(filter(lambda ts: ts >= discrete_timestep_cutoff, timesteps)))
+            if self.scheduler.order == 2:
+                if num_inference_steps % 2 == 1:
+                    num_inference_steps = num_inference_steps - 1
             timesteps = timesteps[:num_inference_steps]
 
         with self.progress_bar(total=num_inference_steps) as progress_bar:
