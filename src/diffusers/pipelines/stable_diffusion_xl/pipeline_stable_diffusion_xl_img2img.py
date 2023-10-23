@@ -488,7 +488,7 @@ class StableDiffusionXLImg2ImgPipeline(
                     f" {negative_prompt_embeds.shape}."
                 )
 
-    def get_timesteps(self, num_inference_steps, strength, device, denoising_start=None):
+    def get_timesteps(self, num_inference_steps, strength, device, denoising_start=None, enable_timesteps_fix=None):
         # get the original timestep using init_timestep
         if denoising_start is None:
             init_timestep = min(int(num_inference_steps * strength), num_inference_steps)
@@ -501,16 +501,26 @@ class StableDiffusionXLImg2ImgPipeline(
         # Strength is irrelevant if we directly request a timestep to start at;
         # that is, strength is determined by the denoising_start instead.
         if denoising_start is not None:
-            num_skip_timesteps = int(
-                round(
-                 (denoising_start * len(timesteps))
+            if enable_timesteps_fix:
+                num_skip_timesteps = int(
+                    round(
+                        (denoising_start * len(timesteps))
+                    )
                 )
-            )
-            if self.scheduler.order == 2:
-                if num_skip_timesteps % 2 == 1:
-                    num_skip_timesteps = num_skip_timesteps - 1
-            timesteps = timesteps[num_skip_timesteps:]
-            return timesteps, len(timesteps)
+                if self.scheduler.order == 2:
+                    if num_skip_timesteps % 2 == 1:
+                        num_skip_timesteps = num_skip_timesteps - 1
+                timesteps = timesteps[num_skip_timesteps:]
+                return timesteps, len(timesteps)
+            else:
+                discrete_timestep_cutoff = int(
+                    round(
+                        self.scheduler.config.num_train_timesteps
+                        - (denoising_start * self.scheduler.config.num_train_timesteps)
+                    )
+                )
+                timesteps = list(filter(lambda ts: ts < discrete_timestep_cutoff, timesteps))
+                return torch.tensor(timesteps), len(timesteps)
 
         return timesteps, num_inference_steps - t_start
 
@@ -687,6 +697,7 @@ class StableDiffusionXLImg2ImgPipeline(
         negative_target_size: Optional[Tuple[int, int]] = None,
         aesthetic_score: float = 6.0,
         negative_aesthetic_score: float = 2.5,
+        enable_timesteps_fix: Optional[bool] = False,
     ):
         r"""
         Function invoked when calling the pipeline for generation.
@@ -891,7 +902,7 @@ class StableDiffusionXLImg2ImgPipeline(
 
         self.scheduler.set_timesteps(num_inference_steps, device=device)
         timesteps, num_inference_steps = self.get_timesteps(
-            num_inference_steps, strength, device, denoising_start=denoising_start if denoising_value_valid else None
+            num_inference_steps, strength, device, denoising_start=denoising_start if denoising_value_valid else None, enable_timesteps_fix=enable_timesteps_fix
         )
         latent_timestep = timesteps[:1].repeat(batch_size * num_images_per_prompt)
 

@@ -572,6 +572,7 @@ class StableDiffusionXLPipeline(DiffusionPipeline, FromSingleFileMixin, LoraLoad
         negative_original_size: Optional[Tuple[int, int]] = None,
         negative_crops_coords_top_left: Tuple[int, int] = (0, 0),
         negative_target_size: Optional[Tuple[int, int]] = None,
+        enable_timesteps_fix: Optional[bool] = False,
     ):
         r"""
         Function invoked when calling the pipeline for generation.
@@ -811,15 +812,25 @@ class StableDiffusionXLPipeline(DiffusionPipeline, FromSingleFileMixin, LoraLoad
 
         # 7.1 Apply denoising_end
         if denoising_end is not None and isinstance(denoising_end, float) and denoising_end > 0 and denoising_end < 1:
-            num_inference_steps = int(
-                round(
-                 (denoising_end * len(timesteps))
+            if enable_timesteps_fix:
+                num_inference_steps = int(
+                    round(
+                    (denoising_end * len(timesteps))
+                    )
                 )
-            )
-            if self.scheduler.order == 2:
-                if num_inference_steps % 2 == 1:
-                    num_inference_steps = num_inference_steps - 1
-            timesteps = timesteps[:num_inference_steps]
+                if self.scheduler.order == 2:
+                    if num_inference_steps % 2 == 1:
+                        num_inference_steps = num_inference_steps - 1
+                timesteps = timesteps[:num_inference_steps]
+            else:
+                discrete_timestep_cutoff = int(
+                    round(
+                        self.scheduler.config.num_train_timesteps
+                        - (denoising_end * self.scheduler.config.num_train_timesteps)
+                    )
+                )
+                num_inference_steps = len(list(filter(lambda ts: ts >= discrete_timestep_cutoff, timesteps)))
+                timesteps = timesteps[:num_inference_steps]
 
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             for i, t in enumerate(timesteps):
