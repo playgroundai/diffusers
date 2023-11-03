@@ -345,7 +345,7 @@ class LMSDiscreteScheduler(SchedulerMixin, ConfigMixin):
         model_output: torch.FloatTensor,
         timestep: Union[float, torch.FloatTensor],
         sample: torch.FloatTensor,
-        order: int = 4,
+        order: int = None,
         return_dict: bool = True,
     ) -> Union[LMSDiscreteSchedulerOutput, Tuple]:
         """
@@ -378,6 +378,12 @@ class LMSDiscreteScheduler(SchedulerMixin, ConfigMixin):
 
         if self.step_index is None:
             self._init_step_index(timestep)
+
+        if order is None:
+            order = 4
+            # Stabilise for last few steps when using default sigmas to prevent noise
+            if not self.config.use_karras_sigmas and len(self.timesteps) - self.step_index < 15:
+                order = 1
 
         sigma = self.sigmas[self.step_index]
 
