@@ -568,7 +568,8 @@ class StableDiffusionXLImg2ImgPipeline(
         else:
             t_start = 0
 
-        timesteps = self.scheduler.timesteps[t_start * self.scheduler.order :]
+        init_timestep_val = self.scheduler.timesteps[t_start * self.scheduler.order]
+        timesteps = self.scheduler.timesteps[self.scheduler.timesteps <= init_timestep_val]
 
         # Strength is irrelevant if we directly request a timestep to start at;
         # that is, strength is determined by the denoising_start instead.
