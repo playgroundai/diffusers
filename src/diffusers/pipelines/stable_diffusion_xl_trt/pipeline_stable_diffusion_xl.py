@@ -164,11 +164,17 @@ class StableDiffusionXLPipeline(
         tokenizer_2: CLIPTokenizer,
         unet: UNet2DConditionModel,
         scheduler: KarrasDiffusionSchedulers,
-        optimized_model_dir: str,
+        optimized_model_dir: Optional[str] = None,
         force_zeros_for_empty_prompt: bool = True,
         add_watermarker: Optional[bool] = None,
     ):
         super().__init__()
+
+        if optimized_model_dir is None:
+            raise ValueError(
+                "Please provide an `optimized_model_dir` to the pipeline. This is the directory where the optimized"
+                " model files are located."
+            )
 
         self.register_modules(
             vae=vae,
