@@ -7,12 +7,6 @@ import torch
 #     PNDMScheduler, UniPCMultistepScheduler
 from diffusers import EulerAncestralDiscreteScheduler
 
-from .constants import lora_storage_dir, storage_dir
-
-def get_storage_dir(use_lora: bool = False):
-    return lora_storage_dir if use_lora else storage_dir
-
-
 class PIPELINE_TYPE(Enum):
     TXT2IMG = auto()
     IMG2IMG = auto()
