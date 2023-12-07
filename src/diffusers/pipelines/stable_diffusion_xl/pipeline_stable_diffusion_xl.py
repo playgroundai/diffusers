@@ -861,7 +861,7 @@ class StableDiffusionXLPipeline(
         timesteps: List[int] = None,
         denoising_end: Optional[float] = None,
         guidance_scale: float = 5.0,
-        uncond_guidance_scale: float = 5.0,
+        guidance_alpha: float = 0.5,
         negative_prompt: Optional[Union[str, List[str]]] = None,
         negative_prompt_2: Optional[Union[str, List[str]]] = None,
         num_images_per_prompt: Optional[int] = 1,
@@ -1221,8 +1221,8 @@ class StableDiffusionXLPipeline(
                 # perform guidance
                 if self.do_classifier_free_guidance:
                     noise_pred_uncond, noise_pred_neg, noise_pred_text = noise_pred.chunk(3)
-                    noise_pred = noise_pred_uncond + 0.5 * (
-                        uncond_guidance_scale * (noise_pred_text - noise_pred_uncond) + self.guidance_scale * (noise_pred_text - noise_pred_neg)
+                    noise_pred = noise_pred_uncond + self.guidance_scale * (
+                        guidance_alpha * (noise_pred_text - noise_pred_uncond) + (1 - guidance_alpha) * (noise_pred_text - noise_pred_neg)
                     )
 
                 if self.do_classifier_free_guidance and self.guidance_rescale > 0.0:
