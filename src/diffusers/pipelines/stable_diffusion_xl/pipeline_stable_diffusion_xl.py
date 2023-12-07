@@ -861,6 +861,7 @@ class StableDiffusionXLPipeline(
         timesteps: List[int] = None,
         denoising_end: Optional[float] = None,
         guidance_scale: float = 5.0,
+        uncond_guidance_scale: float = 5.0,
         negative_prompt: Optional[Union[str, List[str]]] = None,
         negative_prompt_2: Optional[Union[str, List[str]]] = None,
         num_images_per_prompt: Optional[int] = 1,
@@ -1149,9 +1150,11 @@ class StableDiffusionXLPipeline(
             negative_add_time_ids = add_time_ids
 
         if self.do_classifier_free_guidance:
-            prompt_embeds = torch.cat([negative_prompt_embeds, prompt_embeds], dim=0)
-            add_text_embeds = torch.cat([negative_pooled_prompt_embeds, add_text_embeds], dim=0)
-            add_time_ids = torch.cat([negative_add_time_ids, add_time_ids], dim=0)
+            zero_prompt_embeds = torch.zeros_like(prompt_embeds)
+            zero_pooled_prompt_embeds = torch.zeros_like(pooled_prompt_embeds)
+            prompt_embeds = torch.cat([zero_prompt_embeds, negative_prompt_embeds, prompt_embeds], dim=0)
+            add_text_embeds = torch.cat([zero_pooled_prompt_embeds, negative_pooled_prompt_embeds, add_text_embeds], dim=0)
+            add_time_ids = torch.cat([negative_add_time_ids, negative_add_time_ids, add_time_ids], dim=0)
 
         prompt_embeds = prompt_embeds.to(device)
         add_text_embeds = add_text_embeds.to(device)
@@ -1197,7 +1200,7 @@ class StableDiffusionXLPipeline(
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             for i, t in enumerate(timesteps):
                 # expand the latents if we are doing classifier free guidance
-                latent_model_input = torch.cat([latents] * 2) if self.do_classifier_free_guidance else latents
+                latent_model_input = torch.cat([latents] * 3) if self.do_classifier_free_guidance else latents
 
                 latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
 
@@ -1217,8 +1220,8 @@ class StableDiffusionXLPipeline(
 
                 # perform guidance
                 if self.do_classifier_free_guidance:
-                    noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
-                    noise_pred = noise_pred_uncond + self.guidance_scale * (noise_pred_text - noise_pred_uncond)
+                    noise_pred_uncond, noise_pred_neg, noise_pred_text = noise_pred.chunk(3)
+                    noise_pred = noise_pred_uncond + uncond_guidance_scale * (noise_pred_text - noise_pred_uncond) + self.guidance_scale * (noise_pred_text - noise_pred_neg) 
 
                 if self.do_classifier_free_guidance and self.guidance_rescale > 0.0:
                     # Based on 3.4. in https://arxiv.org/pdf/2305.08891.pdf
