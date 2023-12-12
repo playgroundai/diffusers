@@ -19,7 +19,7 @@ from .clip import CLIPRunner
 from .clip_2 import CLIP2Runner
 from .UNetXL import UNETXLRunnerInfer
 from .vae import ImageOnlyVaeRunner
-from .sd_utils import PIPELINE_TYPE, get_storage_dir
+from .sd_utils import PIPELINE_TYPE
 
 import torch
 from transformers import CLIPTextModel, CLIPTextModelWithProjection, CLIPTokenizer
@@ -166,9 +166,15 @@ class StableDiffusionXLPipeline(
         scheduler: KarrasDiffusionSchedulers,
         force_zeros_for_empty_prompt: bool = True,
         add_watermarker: Optional[bool] = None,
-        use_lora: bool = False
+        # TODO: This isn't actually optional
+        optimized_model_dir: Optional[str] = None,
     ):
         super().__init__()
+
+        if not optimized_model_dir:
+            raise ValueError("optimized_models_dir must be specified")
+        else:
+            self.optimized_model_dir = optimized_model_dir
 
         self.register_modules(
             vae=vae,
@@ -191,17 +197,17 @@ class StableDiffusionXLPipeline(
             self.watermark = None
 
         stream = torch.cuda.current_stream().cuda_stream
-        clip_runner = CLIPRunner(framework_model_dir=get_storage_dir(use_lora), output_hidden_states=True,
+        clip_runner = CLIPRunner(framework_model_dir=self.optimized_model_dir, output_hidden_states=True,
                                  version=version, pipeline_type=PIPELINE_TYPE.SD_XL_BASE, stream=stream)
         clip_obj = clip_runner.make_clip()
         self.base_clip_engine = clip_runner.load_engine(clip_obj, batch_size=1)
 
-        clip2_runner = CLIP2Runner(framework_model_dir=get_storage_dir(use_lora), output_hidden_states=True,
+        clip2_runner = CLIP2Runner(framework_model_dir=self.optimized_model_dir, output_hidden_states=True,
                                    version=version, pipeline_type=PIPELINE_TYPE.SD_XL_BASE, stream=stream)
         clip2_obj = clip2_runner.make_clip_with_proj()
         self.base_clip2_engine = clip2_runner.load_engine(clip2_obj, batch_size=1)
 
-        self.unetxl_runner = UNETXLRunnerInfer(framework_model_dir=get_storage_dir(use_lora), version=version,
+        self.unetxl_runner = UNETXLRunnerInfer(framework_model_dir=self.optimized_model_dir, version=version,
                                                scheduler=None, pipeline_type=PIPELINE_TYPE.SD_XL_BASE, stream=stream)
         self.base_unetxl_engine = self.unetxl_runner.load_engine()
 

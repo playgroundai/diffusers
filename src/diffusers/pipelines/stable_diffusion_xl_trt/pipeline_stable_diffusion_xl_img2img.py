@@ -52,7 +52,6 @@ from .pipeline_output import StableDiffusionXLPipelineOutput
 
 from .constants import version
 from .constants import ONNX_OPSET
-from .constants import storage_dir
 
 if is_invisible_watermark_available():
     from .watermark import StableDiffusionXLWatermarker
@@ -185,8 +184,15 @@ class StableDiffusionXLImg2ImgPipeline(
         requires_aesthetics_score: bool = False,
         force_zeros_for_empty_prompt: bool = True,
         add_watermarker: Optional[bool] = None,
+        # TODO: This isn't actually optional
+        optimized_model_dir: Optional[str] = None,
     ):
         super().__init__()
+
+        if not optimized_model_dir:
+            raise ValueError("optimized_models_dir must be specified")
+        else:
+            self.optimized_model_dir = optimized_model_dir
 
         self.register_modules(
             vae=vae,
@@ -209,11 +215,11 @@ class StableDiffusionXLImg2ImgPipeline(
 
         stream = torch.cuda.current_stream().cuda_stream
 
-        self.unetxl_runner = UNETXLRunnerInfer(framework_model_dir=storage_dir, version=version, scheduler=None,
+        self.unetxl_runner = UNETXLRunnerInfer(framework_model_dir=self.optimized_model_dir, version=version, scheduler=None,
                                           pipeline_type=PIPELINE_TYPE.SD_XL_REFINER, stream=stream)
         self.ref_unetxl_engine = self.unetxl_runner.load_engine()
 
-        clip2_runner = CLIP2Runner(framework_model_dir=storage_dir, output_hidden_states=True, version=version,
+        clip2_runner = CLIP2Runner(framework_model_dir=self.optimized_model_dir, output_hidden_states=True, version=version,
                                    pipeline_type=PIPELINE_TYPE.SD_XL_REFINER, stream=stream)
         clip2_obj = clip2_runner.make_clip_with_proj()
         self.ref_clip2_engine = clip2_runner.load_engine(clip2_obj, batch_size=1)
@@ -247,7 +253,7 @@ class StableDiffusionXLImg2ImgPipeline(
         self.ref_unetxl_engine.allocate_buffers(shape_dict=self.unetxl_runner.get_shape_dict(h, w), device="cuda")
 
         # TODO: this one is delightfully inconsistent.
-        # self.base_vae_runner = VAERunner(framework_model_dir=storage_dir, version=version,
+        # self.base_vae_runner = VAERunner(framework_model_dir=self.optimized_model_dir, version=version,
         #                                  pipeline_type=PIPELINE_TYPE.SD_XL_BASE)
         # self.base_vae_obj = self.base_vae_runner.make_vae()
         # self.base_vae_model = self.base_vae_runner.get_vae_model(self.base_vae_obj)
