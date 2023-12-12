@@ -1243,27 +1243,31 @@ class StableDiffusionXLImg2ImgPipeline(
         self.ref_unetxl_engine.copy_into_tensor("text_embeds", add_text_embeds)
         self.ref_unetxl_engine.copy_into_tensor("time_ids", add_time_ids)
 
-        for i, t in enumerate(timesteps):
-            # expand the latents if we are doing classifier free guidance
-            latent_model_input = torch.cat([latents] * 2) if self.do_classifier_free_guidance else latents
-            latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
+        self._num_timesteps = len(timesteps)
+        with self.progress_bar(total=num_inference_steps) as progress_bar:
+            for i, t in enumerate(timesteps):
+                # expand the latents if we are doing classifier free guidance
+                latent_model_input = torch.cat([latents] * 2) if self.do_classifier_free_guidance else latents
+                latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
 
-            # predict the noise residual
-            self.ref_unetxl_engine.copy_into_tensor("sample", latent_model_input)
-            self.ref_unetxl_engine.copy_into_tensor("timestep", t)
-            noise_pred = self.ref_unetxl_engine.infer_using_graph(stream)["latent"]
+                # predict the noise residual
+                self.ref_unetxl_engine.copy_into_tensor("sample", latent_model_input)
+                self.ref_unetxl_engine.copy_into_tensor("timestep", t)
+                noise_pred = self.ref_unetxl_engine.infer_using_graph(stream)["latent"]
 
-            # perform guidance
-            if self.do_classifier_free_guidance:
-                noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
-                noise_pred = noise_pred_uncond + self.guidance_scale * (noise_pred_text - noise_pred_uncond)
+                # perform guidance
+                if self.do_classifier_free_guidance:
+                    noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
+                    noise_pred = noise_pred_uncond + self.guidance_scale * (noise_pred_text - noise_pred_uncond)
 
-                if self.guidance_rescale > 0.0:
-                    # Based on 3.4. in https://arxiv.org/pdf/2305.08891.pdf
-                    noise_pred = rescale_noise_cfg(noise_pred, noise_pred_text, guidance_rescale=self.guidance_rescale)
+                    if self.guidance_rescale > 0.0:
+                        # Based on 3.4. in https://arxiv.org/pdf/2305.08891.pdf
+                        noise_pred = rescale_noise_cfg(noise_pred, noise_pred_text, guidance_rescale=self.guidance_rescale)
 
-            # compute the previous noisy sample x_t -> x_t-1
-            latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs, return_dict=False)[0]
+                # compute the previous noisy sample x_t -> x_t-1
+                latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs, return_dict=False)[0]
+
+                progress_bar.update()
 
         if not output_type == "latent":
             image = self.vae_runner.run(latents)
