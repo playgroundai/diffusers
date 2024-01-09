@@ -48,7 +48,6 @@ from ...utils import (
 from ...utils.torch_utils import randn_tensor
 from ..pipeline_utils import DiffusionPipeline
 from .pipeline_output import StableDiffusionXLPipelineOutput
-from .constants import version
 
 if is_invisible_watermark_available():
     from .watermark import StableDiffusionXLWatermarker
