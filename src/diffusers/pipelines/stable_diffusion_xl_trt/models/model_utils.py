@@ -128,6 +128,8 @@ def get_path(version, pipeline, controlnet=None):
         return "stabilityai/stable-diffusion-2-1"
     elif version == "2.1-base":
         return "stabilityai/stable-diffusion-2-1-base"
+    elif version == "pgv2":
+        return "playgroundai/playground-v2-1024px-aesthetic"
     elif version == 'xl-1.0':
         if pipeline.is_sd_xl_base():
             return "stabilityai/stable-diffusion-xl-base-1.0"
@@ -145,11 +147,13 @@ def get_clip_embedding_dim(version, pipeline):
         return 1024
     elif version in ("xl-1.0") and pipeline.is_sd_xl_base():
         return 768
+    elif version in ("pgv2"):
+        return 768
     else:
         raise ValueError(f"Invalid version {version} + pipeline {pipeline}")
 
 def get_clipwithproj_embedding_dim(version, pipeline):
-    if version in ("xl-1.0"):
+    if version in ("xl-1.0", "pgv2"):
         return 1280
     else:
         raise ValueError(f"Invalid version {version} + pipeline {pipeline}")
@@ -159,6 +163,8 @@ def get_unet_embedding_dim(version, pipeline):
         return 768
     elif version in ("2.0", "2.0-base", "2.1", "2.1-base"):
         return 1024
+    elif version in ("pgv2"):
+        return 2048
     elif version in ("xl-1.0") and pipeline.is_sd_xl_base():
         return 2048
     elif version in ("xl-1.0") and pipeline.is_sd_xl_refiner():
