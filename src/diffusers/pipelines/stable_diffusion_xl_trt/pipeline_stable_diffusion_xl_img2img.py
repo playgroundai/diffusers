@@ -50,7 +50,6 @@ from ...utils.torch_utils import randn_tensor
 from ..pipeline_utils import DiffusionPipeline
 from .pipeline_output import StableDiffusionXLPipelineOutput
 
-from .constants import version
 from .constants import ONNX_OPSET
 
 if is_invisible_watermark_available():
@@ -186,6 +185,7 @@ class StableDiffusionXLImg2ImgPipeline(
         add_watermarker: Optional[bool] = None,
         # TODO: This isn't actually optional
         optimized_model_dir: Optional[str] = None,
+        version: Optional[str] = 'xl-1.0',
     ):
         super().__init__()
 

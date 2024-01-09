@@ -168,6 +168,8 @@ class StableDiffusionXLPipeline(
         add_watermarker: Optional[bool] = None,
         # TODO: This isn't actually optional
         optimized_model_dir: Optional[str] = None,
+        version: Optional[str] = 'xl-1.0',
+
     ):
         super().__init__()
 
