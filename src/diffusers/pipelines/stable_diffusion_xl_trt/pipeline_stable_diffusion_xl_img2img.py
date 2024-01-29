@@ -186,6 +186,7 @@ class StableDiffusionXLImg2ImgPipeline(
         # TODO: This isn't actually optional
         optimized_model_dir: Optional[str] = None,
         version: Optional[str] = 'xl-1.0',
+        pipeline_type: PIPELINE_TYPE = PIPELINE_TYPE.SD_XL_BASE,
     ):
         super().__init__()
 
@@ -216,11 +217,11 @@ class StableDiffusionXLImg2ImgPipeline(
         stream = torch.cuda.current_stream().cuda_stream
 
         self.unetxl_runner = UNETXLRunnerInfer(framework_model_dir=self.optimized_model_dir, version=version, scheduler=None,
-                                          pipeline_type=PIPELINE_TYPE.SD_XL_REFINER, stream=stream)
+                                          pipeline_type=pipeline_type, stream=stream)
         self.ref_unetxl_engine = self.unetxl_runner.load_engine()
 
         clip2_runner = CLIP2Runner(framework_model_dir=self.optimized_model_dir, output_hidden_states=True, version=version,
-                                   pipeline_type=PIPELINE_TYPE.SD_XL_REFINER, stream=stream)
+                                   pipeline_type=pipeline_type, stream=stream)
         clip2_obj = clip2_runner.make_clip_with_proj()
         self.ref_clip2_engine = clip2_runner.load_engine(clip2_obj, batch_size=1)
 
