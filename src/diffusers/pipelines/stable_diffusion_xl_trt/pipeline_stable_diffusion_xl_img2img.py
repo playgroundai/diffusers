@@ -1052,12 +1052,19 @@ class StableDiffusionXLImg2ImgPipeline(
             `tuple. When returning a tuple, the first element is a list with the generated images.
         """
 
-        height, width = image.shape[-2:]
-        height = height * self.vae_scale_factor
-        width = width * self.vae_scale_factor
+        # Deduce whether the input is a latent or an image. Both are accepted because _reasons_
+        if image.shape[1] == 4:
+            # It's a latent.
+            height, width = image.shape[-2:]
+            height = height * self.vae_scale_factor
+            width = width * self.vae_scale_factor
+        else:
+            height = image.shape[0]
+            width = image.shape[1]
 
+        # Needs to be initialised with the actual *image* size. Note that the "image" parameter may actually
+        # be latents, because everything must be as confusing as possible.
         self.possibly_reinitialise_tensorrt(width, height)
-
 
         callback = kwargs.pop("callback", None)
         callback_steps = kwargs.pop("callback_steps", None)
