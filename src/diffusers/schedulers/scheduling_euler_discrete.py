@@ -519,6 +519,7 @@ class EulerDiscreteScheduler(SchedulerMixin, ConfigMixin):
         # backwards compatibility
         if self.config.prediction_type == "original_sample" or self.config.prediction_type == "sample":
             pred_original_sample = model_output
+            print("euler original_sample")
         elif self.config.prediction_type == "epsilon":
             pred_original_sample = sample - sigma_hat * model_output
         elif self.config.prediction_type == "v_prediction":
