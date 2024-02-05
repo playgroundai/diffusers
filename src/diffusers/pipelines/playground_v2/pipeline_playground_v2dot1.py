@@ -554,7 +554,7 @@ class PlaygroundV2dot1Pipeline(StableDiffusionXLPipeline):
         edm_scheduler = new_monkeypatched_scheduler_for_edm(self.scheduler)
         with swap_scheduler(self, edm_scheduler):
             # 4. Prepare timesteps
-            timesteps, num_inference_steps = retrieve_timesteps(edm_scheduler, num_inference_steps, device, timesteps)
+            timesteps, num_inference_steps = retrieve_timesteps(self.scheduler, num_inference_steps, device, timesteps)
 
             # 5. Prepare latent variables
             num_channels_latents = self.unet.config.in_channels
@@ -616,7 +616,7 @@ class PlaygroundV2dot1Pipeline(StableDiffusionXLPipeline):
                     image_embeds = image_embeds.to(device)
 
             # 8. Denoising loop
-            num_warmup_steps = max(len(timesteps) - num_inference_steps * edm_scheduler.order, 0)
+            num_warmup_steps = max(len(timesteps) - num_inference_steps * self.scheduler.order, 0)
 
             # 8.1 Apply denoising_end
             if (
@@ -627,8 +627,8 @@ class PlaygroundV2dot1Pipeline(StableDiffusionXLPipeline):
             ):
                 discrete_timestep_cutoff = int(
                     round(
-                        edm_scheduler.config.num_train_timesteps
-                        - (self.denoising_end * edm_scheduler.config.num_train_timesteps)
+                        self.scheduler.config.num_train_timesteps
+                        - (self.denoising_end * self.scheduler.config.num_train_timesteps)
                     )
                 )
                 num_inference_steps = len(list(filter(lambda ts: ts >= discrete_timestep_cutoff, timesteps)))
@@ -656,7 +656,7 @@ class PlaygroundV2dot1Pipeline(StableDiffusionXLPipeline):
                     c_skip, c_out, c_in, c_noise = edm_scaling(t)  # t is sigma here
 
                     # HACK: we scale the input by c_in when passing to self.unet, so we don't need the scheduler to do it
-                    edm_scheduler.is_scale_input_called = True
+                    self.scheduler.is_scale_input_called = True
 
                     # predict the noise residual
                     added_cond_kwargs = {"text_embeds": add_text_embeds, "time_ids": add_time_ids}
@@ -685,7 +685,7 @@ class PlaygroundV2dot1Pipeline(StableDiffusionXLPipeline):
                         noise_pred = rescale_noise_cfg(noise_pred, noise_pred_text, guidance_rescale=self.guidance_rescale)
 
                     # compute the previous noisy sample x_t -> x_t-1
-                    latents = edm_scheduler.step(noise_pred, t, latents, **extra_step_kwargs, return_dict=False)[0]
+                    latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs, return_dict=False)[0]
 
                     if callback_on_step_end is not None:
                         callback_kwargs = {}
@@ -704,10 +704,10 @@ class PlaygroundV2dot1Pipeline(StableDiffusionXLPipeline):
                         negative_add_time_ids = callback_outputs.pop("negative_add_time_ids", negative_add_time_ids)
 
                     # call the callback, if provided
-                    if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % edm_scheduler.order == 0):
+                    if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
                         progress_bar.update()
                         if callback is not None and i % callback_steps == 0:
-                            step_idx = i // getattr(edm_scheduler, "order", 1)
+                            step_idx = i // getattr(self.scheduler, "order", 1)
                             callback(step_idx, t, latents)
 
                     if XLA_AVAILABLE:
