@@ -31,6 +31,7 @@ from ...schedulers import (
     KarrasDiffusionSchedulers,
     EulerDiscreteScheduler,
     HeunDiscreteScheduler,
+    DPMSolverMultistepScheduler,
 )
 from ...utils import (
     deprecate,
@@ -133,6 +134,7 @@ def retrieve_timesteps(
 SUPPORTED_SCHEDULERS = [
     EulerDiscreteScheduler,
     HeunDiscreteScheduler,
+    DPMSolverMultistepScheduler,
 ]
 
 
@@ -166,9 +168,19 @@ def new_monkeypatched_scheduler_for_edm(scheduler, sigma_min=0.002, sigma_max=80
         """Do not discretize from sigma to t, just return sigma"""
         return sigma
 
+    def edm_sigma_to_alpha_sigma_t(self, sigma):
+        """
+        For DPMSolverMultistepScheduler:
+        Inputs are pre-scaled before going into unet, so alpha_t = 1
+        """
+        alpha_t = torch.tensor(1)
+        sigma_t = sigma
+        return alpha_t, sigma_t
+
     from types import MethodType
 
     scheduler._sigma_to_t = MethodType(edm_sigma_to_t, scheduler)
+    scheduler._sigma_to_alpha_sigma_t = MethodType(edm_sigma_to_alpha_sigma_t, scheduler)
 
     return scheduler
 
@@ -183,6 +195,17 @@ def swap_scheduler(self, new_scheduler):
         yield
     finally:
         self.scheduler = original_scheduler
+
+
+def edm_init_noise_sigma(scheduler):
+    max_sigma = max(scheduler.sigmas) if isinstance(scheduler.sigmas, list) else scheduler.sigmas.max()
+    try:
+        if scheduler.config.timestep_spacing in ["linspace", "trailing"]:
+            return max_sigma
+    except AttributeError:
+        pass
+
+    return (max_sigma**2 + 1) ** 0.5
 
 
 class PlaygroundV2dot1Pipeline(StableDiffusionXLPipeline):
@@ -555,6 +578,9 @@ class PlaygroundV2dot1Pipeline(StableDiffusionXLPipeline):
         with swap_scheduler(self, edm_scheduler):
             # 4. Prepare timesteps
             timesteps, num_inference_steps = retrieve_timesteps(self.scheduler, num_inference_steps, device, timesteps)
+
+            # HACK: we always set init_noise_sigma the same way, regardless of scheduler
+            self.scheduler.init_noise_sigma = edm_init_noise_sigma(self.scheduler)
 
             # 5. Prepare latent variables
             num_channels_latents = self.unet.config.in_channels
