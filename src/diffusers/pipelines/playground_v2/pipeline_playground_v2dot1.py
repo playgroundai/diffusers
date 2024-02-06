@@ -579,8 +579,11 @@ class PlaygroundV2dot1Pipeline(StableDiffusionXLPipeline):
             # 4. Prepare timesteps
             timesteps, num_inference_steps = retrieve_timesteps(self.scheduler, num_inference_steps, device, timesteps)
 
-            # HACK: we always set init_noise_sigma the same way, regardless of scheduler
-            self.scheduler.init_noise_sigma = edm_init_noise_sigma(self.scheduler)
+            try:
+                # HACK: we always set init_noise_sigma the same way, regardless of scheduler
+                self.scheduler.init_noise_sigma = edm_init_noise_sigma(self.scheduler)
+            except AttributeError:
+                pass
 
             # 5. Prepare latent variables
             num_channels_latents = self.unet.config.in_channels
