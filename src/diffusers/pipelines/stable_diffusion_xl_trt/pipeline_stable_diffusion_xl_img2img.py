@@ -220,6 +220,14 @@ class StableDiffusionXLImg2ImgPipeline(
                                           pipeline_type=pipeline_type, stream=stream)
         self.ref_unetxl_engine = self.unetxl_runner.load_engine()
 
+        self.ref_clip_engine = None
+        if pipeline_type == PIPELINE_TYPE.SD_XL_BASE:
+            clip_runner = CLIPRunner(framework_model_dir=self.optimized_model_dir, output_hidden_states=True,
+                                       version=version,
+                                       pipeline_type=pipeline_type, stream=stream)
+            clip_obj = clip_runner.make_clip()
+            self.ref_clip_engine = clip_runner.load_engine(clip_obj, batch_size=1)
+
         clip2_runner = CLIP2Runner(framework_model_dir=self.optimized_model_dir, output_hidden_states=True, version=version,
                                    pipeline_type=pipeline_type, stream=stream)
         clip2_obj = clip2_runner.make_clip_with_proj()
@@ -236,6 +244,9 @@ class StableDiffusionXLImg2ImgPipeline(
 
         self.unetxl_runner.warmup(self.ref_unetxl_engine, 1024, 1024)
         self.vae_runner.warmup(1024, 1024, batch_size=1)
+
+        if self.ref_clip_engine is not None:
+            clip_runner.warmup(self.ref_clip_engine, clip_obj)
         clip2_runner.warmup(self.ref_clip2_engine, clip2_obj)
 
         torch.cuda.synchronize() # Wait for warmup nonsense to finish.
@@ -380,7 +391,8 @@ class StableDiffusionXLImg2ImgPipeline(
 
         # Define tokenizers and text encoders
         tokenizers = [self.tokenizer, self.tokenizer_2] if self.tokenizer is not None else [self.tokenizer_2]
-        text_encoders = [self.ref_clip2_engine]
+        text_encoders = [self.ref_clip_engine, self.ref_clip2_engine] if self.ref_clip_engine is not None else [
+            self.ref_clip2_engine]
 
         stream = torch.cuda.current_stream().cuda_stream
         if prompt_embeds is None:
@@ -650,12 +662,8 @@ class StableDiffusionXLImg2ImgPipeline(
 
         if image.shape[1] == 4:
             init_latents = image
-
         else:
-            # make sure the VAE is in float32 mode, as it overflows in float16
-            if self.vae_runner.model.config.force_upcast:
-                image = image.float()
-                self.vae_runner.model.to(dtype=torch.float32)
+            image = image.to(self.vae_runner.model.dtype)
 
             if isinstance(generator, list) and len(generator) != batch_size:
                 raise ValueError(
@@ -671,9 +679,6 @@ class StableDiffusionXLImg2ImgPipeline(
                 init_latents = torch.cat(init_latents, dim=0)
             else:
                 init_latents = retrieve_latents(self.vae_runner.model.encode(image), generator=generator)
-
-            if self.vae_runner.model.config.force_upcast:
-                self.vae_runner.model.to(dtype)
 
             init_latents = init_latents.to(dtype)
             init_latents = self.vae_runner.model.config.scaling_factor * init_latents
@@ -1052,20 +1057,6 @@ class StableDiffusionXLImg2ImgPipeline(
             `tuple. When returning a tuple, the first element is a list with the generated images.
         """
 
-        # Deduce whether the input is a latent or an image. Both are accepted because _reasons_
-        if image.shape[1] == 4:
-            # It's a latent.
-            height, width = image.shape[-2:]
-            height = height * self.vae_scale_factor
-            width = width * self.vae_scale_factor
-        else:
-            height = image.shape[0]
-            width = image.shape[1]
-
-        # Needs to be initialised with the actual *image* size. Note that the "image" parameter may actually
-        # be latents, because everything must be as confusing as possible.
-        self.possibly_reinitialise_tensorrt(width, height)
-
         callback = kwargs.pop("callback", None)
         callback_steps = kwargs.pop("callback_steps", None)
 
@@ -1140,6 +1131,20 @@ class StableDiffusionXLImg2ImgPipeline(
 
         # 4. Preprocess image
         image = self.image_processor.preprocess(image)
+
+        # Deduce whether the input is a latent or an image. Both are accepted because _reasons_
+        if image.shape[1] == 4:
+            # It's a latent.
+            height, width = image.shape[-2:]
+            height = height * self.vae_scale_factor
+            width = width * self.vae_scale_factor
+        else:
+            height = image.shape[2]
+            width = image.shape[3]
+
+        # Needs to be initialised with the actual *image* size. Note that the "image" parameter may actually
+        # be latents, because everything must be as confusing as possible.
+        self.possibly_reinitialise_tensorrt(width, height)
 
         stream = torch.cuda.current_stream().cuda_stream
 
