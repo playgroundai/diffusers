@@ -58,9 +58,9 @@ EXAMPLE_DOC_STRING = """
     Examples:
         ```py
         >>> import torch
-        >>> from diffusers import PlaygroundV2dot1Pipeline
+        >>> from diffusers import PlaygroundV2dot5Pipeline
 
-        >>> pipe = PlaygroundV2dot1Pipeline.from_pretrained(
+        >>> pipe = PlaygroundV2dot5Pipeline.from_pretrained(
         ...     "playgroundai/playground-v2.1-1024px-aesthetic", torch_dtype=torch.float16
         ... )
         >>> pipe = pipe.to("cuda")
@@ -208,7 +208,7 @@ def edm_init_noise_sigma(scheduler):
     return (max_sigma**2 + 1) ** 0.5
 
 
-class PlaygroundV2dot1Pipeline(StableDiffusionXLPipeline):
+class PlaygroundV2dot5Pipeline(StableDiffusionXLPipeline):
     r"""
     Pipeline for text-to-image generation using Playground V2.1.
 
@@ -278,7 +278,7 @@ class PlaygroundV2dot1Pipeline(StableDiffusionXLPipeline):
             image_encoder=image_encoder,
             feature_extractor=feature_extractor,
             force_zeros_for_empty_prompt=force_zeros_for_empty_prompt,
-            add_watermarker=False,
+            add_watermarker=False,   # Pla
         )
 
         self.register_modules(
