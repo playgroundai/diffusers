@@ -278,7 +278,7 @@ class PlaygroundV2dot5Pipeline(StableDiffusionXLPipeline):
             image_encoder=image_encoder,
             feature_extractor=feature_extractor,
             force_zeros_for_empty_prompt=force_zeros_for_empty_prompt,
-            add_watermarker=False,   # Pla
+            add_watermarker=False,   # XXXPGv2.5 change
         )
 
         self.register_modules(
@@ -298,6 +298,7 @@ class PlaygroundV2dot5Pipeline(StableDiffusionXLPipeline):
 
         self.default_sample_size = self.unet.config.sample_size
 
+        # XXXPGv2.5: PGv2.5 only supports a subset of schedulers for now
         if self.scheduler.__class__ not in SUPPORTED_SCHEDULERS:
             raise ValueError(
                 f"Unsupported scheduler for PGv2.1 {self.scheduler.__class__}. Currently supported schedulers are: {SUPPORTED_SCHEDULERS}"
@@ -506,9 +507,11 @@ class PlaygroundV2dot5Pipeline(StableDiffusionXLPipeline):
         original_size = original_size or (height, width)
         target_size = target_size or (height, width)
 
+        # XXXPGv2.5: PGv2.5 uses EDM style scaling for VAE outputs.  The specific values come from VAE config.json file.
         # 0.5: Validate the VAE model for EDM-style inference
         self.validate_vae_edm_scaling()
 
+        # XXXPGv2.5: Check if we're using a supported scheduler
         # 0.6: Check if the scheduler is supported
         if self.scheduler.__class__ not in SUPPORTED_SCHEDULERS:
             raise ValueError(
@@ -574,11 +577,13 @@ class PlaygroundV2dot5Pipeline(StableDiffusionXLPipeline):
             clip_skip=self.clip_skip,
         )
 
+        # XXXPGv2.5: use the Euler sigmas from https://arxiv.org/abs/2206.00364.
         edm_scheduler = new_monkeypatched_scheduler_for_edm(self.scheduler)
-        with swap_scheduler(self, edm_scheduler):
+        with swap_scheduler(self, edm_scheduler):  # XXXPGv2.5: swap in the monkey patched scheduler
             # 4. Prepare timesteps
             timesteps, num_inference_steps = retrieve_timesteps(self.scheduler, num_inference_steps, device, timesteps)
 
+            # XXXPGv2.5: init the EDM noise sigma
             try:
                 # HACK: we always set init_noise_sigma the same way, regardless of scheduler
                 self.scheduler.init_noise_sigma = edm_init_noise_sigma(self.scheduler)
@@ -682,9 +687,10 @@ class PlaygroundV2dot5Pipeline(StableDiffusionXLPipeline):
                     # expand the latents if we are doing classifier free guidance
                     latent_model_input = torch.cat([latents] * 2) if self.do_classifier_free_guidance else latents
 
+                    # XXXPGv2.5: use the EDM scale values from https://arxiv.org/abs/2206.00364
                     c_skip, c_out, c_in, c_noise = edm_scaling(t)  # t is sigma here
 
-                    # HACK: we scale the input by c_in when passing to self.unet, so we don't need the scheduler to do it
+                    # XXXPGv2.5: HACK: we scale the input by c_in when passing to self.unet, so we don't need the scheduler to do it
                     self.scheduler.is_scale_input_called = True
 
                     # predict the noise residual
@@ -692,8 +698,8 @@ class PlaygroundV2dot5Pipeline(StableDiffusionXLPipeline):
                     if ip_adapter_image is not None:
                         added_cond_kwargs["image_embeds"] = image_embeds
                     noise_pred = self.unet(
-                        latent_model_input * c_in,
-                        c_noise,
+                        latent_model_input * c_in, # XXXPGv2.5: manually scale the input according to c_in
+                        c_noise, # XXXPGv2.5: UNet is conditioned on C_noise instead of timestep t
                         encoder_hidden_states=prompt_embeds,
                         timestep_cond=timestep_cond,
                         cross_attention_kwargs=self.cross_attention_kwargs,
@@ -701,7 +707,7 @@ class PlaygroundV2dot5Pipeline(StableDiffusionXLPipeline):
                         return_dict=False,
                     )[0]
 
-                    # Based on Equation 7 in https://arxiv.org/abs/2206.00364.pdf
+                    # XXXPGv2.5: Based on Equation 7 in https://arxiv.org/abs/2206.00364.pdf
                     noise_pred = noise_pred * c_out + latent_model_input * c_skip
 
                     # perform guidance
@@ -750,6 +756,7 @@ class PlaygroundV2dot5Pipeline(StableDiffusionXLPipeline):
                     self.upcast_vae()
                     latents = latents.to(next(iter(self.vae.post_quant_conv.parameters())).dtype)
 
+                # XXXPGv2.5: use the EDM scale values from https://arxiv.org/abs/2206.00364 to decode VAE latents
                 edm_mean = torch.tensor(self.vae.config.edm_mean).view(1, 4, 1, 1).to(latents.device)
                 edm_std = torch.tensor(self.vae.config.edm_std).view(1, 4, 1, 1).to(latents.device)
                 latents_denorm = latents * edm_std / self.vae.config.edm_scale + edm_mean
