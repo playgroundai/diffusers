@@ -234,7 +234,7 @@ else:
         "WuerstchenPriorPipeline",
     ]
     _import_structure["playground_v2"] = [
-        "PlaygroundV2dot1Pipeline",
+        "PlaygroundV2dot5Pipeline",
     ]
 try:
     if not is_onnx_available():
@@ -424,7 +424,7 @@ if TYPE_CHECKING or DIFFUSERS_SLOW_IMPORT:
         from .pia import PIAPipeline
         from .pixart_alpha import PixArtAlphaPipeline
         from .playground_v2 import (
-            PlaygroundV2dot1Pipeline,
+            PlaygroundV2dot5Pipeline,
         )
         from .semantic_stable_diffusion import SemanticStableDiffusionPipeline
         from .shap_e import ShapEImg2ImgPipeline, ShapEPipeline

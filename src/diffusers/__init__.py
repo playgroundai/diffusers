@@ -252,7 +252,7 @@ else:
             "PaintByExamplePipeline",
             "PIAPipeline",
             "PixArtAlphaPipeline",
-            "PlaygroundV2dot1Pipeline",
+            "PlaygroundV2dot5Pipeline",
             "SemanticStableDiffusionPipeline",
             "ShapEImg2ImgPipeline",
             "ShapEPipeline",

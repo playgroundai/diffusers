@@ -21,7 +21,7 @@ except OptionalDependencyNotAvailable:
 
     _dummy_objects.update(get_objects_from_module(dummy_torch_and_transformers_objects))
 else:
-    _import_structure["pipeline_playground_v2dot1"] = ["PlaygroundV2dot1Pipeline"]
+    _import_structure["pipeline_playground_v2dot5"] = ["PlaygroundV2dot5Pipeline"]
 
 
 if TYPE_CHECKING or DIFFUSERS_SLOW_IMPORT:
