@@ -221,7 +221,8 @@ def edm_init_noise_sigma(scheduler):
 
     return (max_sigma**2 + 1) ** 0.5
 
-class PlaygroundV2dot5Pipeline(StableDiffusionXLPipeline):
+
+class PlaygroundV2dot5Pipeline(DiffusionPipeline, FromSingleFileMixin, StableDiffusionXLLoraLoaderMixin, TextualInversionLoaderMixin):
     r"""
     Pipeline for text-to-image generation using Stable Diffusion XL.
 
