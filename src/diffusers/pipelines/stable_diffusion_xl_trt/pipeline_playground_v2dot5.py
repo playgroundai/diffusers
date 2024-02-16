@@ -1098,7 +1098,8 @@ class PlaygroundV2dot5Pipeline(DiffusionPipeline, FromSingleFileMixin, StableDif
         edm_scheduler = new_monkeypatched_scheduler_for_edm(self.scheduler)
         with swap_scheduler(self, edm_scheduler):  # XXXPGv2.5: swap in the monkey patched scheduler
             # 4. Prepare timesteps
-            timesteps, num_inference_steps = retrieve_timesteps(self.scheduler, num_inference_steps, device, timesteps)
+            timesteps, num_inference_steps = retrieve_timesteps(
+                self.scheduler, num_inference_steps, device)
 
             # XXXPGv2.5: init the EDM noise sigma
             try:
