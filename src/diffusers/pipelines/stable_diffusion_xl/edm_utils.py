@@ -28,6 +28,7 @@ def new_monkeypatched_scheduler_for_edm(scheduler, sigma_min=0.002, sigma_max=80
     scheduler.config.sigma_min = 0.002
     scheduler.config.sigma_max = 80.0
     scheduler.config.prediction_type = "sample"
+    scheduler.config.use_edm = True
 
     def edm_sigma_to_t(self, sigma, log_sigmas):
         """Do not discretize from sigma to t, just return sigma"""
