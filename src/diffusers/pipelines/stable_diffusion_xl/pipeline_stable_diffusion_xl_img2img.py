@@ -718,8 +718,12 @@ class StableDiffusionXLImg2ImgPipeline(
             if self.vae.config.force_upcast:
                 self.vae.to(dtype)
 
+
+            edm_mean = torch.tensor(self.vae.config.edm_mean, dtype=init_latents.dtype).view(1, 4, 1, 1).to(init_latents.device)
+            edm_std = torch.tensor(self.vae.config.edm_std, dtype=init_latents.dtype).view(1, 4, 1, 1).to(init_latents.device)
+            init_latents = (init_latents - edm_mean) * self.vae.config.edm_scale / edm_std
             init_latents = init_latents.to(dtype)
-            init_latents = self.vae.config.scaling_factor * init_latents
+            # init_latents = self.vae.config.scaling_factor * init_latents
 
         if batch_size > init_latents.shape[0] and batch_size % init_latents.shape[0] == 0:
             # expand init_latents for batch_size
@@ -735,6 +739,7 @@ class StableDiffusionXLImg2ImgPipeline(
         if add_noise:
             shape = init_latents.shape
             noise = randn_tensor(shape, generator=generator, device=device, dtype=dtype)
+            # init_latents = torch.zeros_like(init_latents)
             # get latents
             init_latents = self.scheduler.add_noise(init_latents, noise, timestep)
 
@@ -1352,7 +1357,7 @@ class StableDiffusionXLImg2ImgPipeline(
                         added_cond_kwargs["image_embeds"] = image_embeds
                     noise_pred = self.unet(
                         latent_model_input,
-                        t,
+                        timestep_param,
                         encoder_hidden_states=prompt_embeds,
                         timestep_cond=timestep_cond,
                         cross_attention_kwargs=self.cross_attention_kwargs,
