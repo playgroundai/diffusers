@@ -720,12 +720,12 @@ class StableDiffusionXLImg2ImgPipeline(
 
             init_latents = init_latents.to(dtype)
 
-        if use_edm:
-            edm_mean = torch.tensor(self.vae.config.edm_mean, dtype=init_latents.dtype).view(1, 4, 1, 1).to(init_latents.device)
-            edm_std = torch.tensor(self.vae.config.edm_std, dtype=init_latents.dtype).view(1, 4, 1, 1).to(init_latents.device)
-            init_latents = (init_latents - edm_mean) * self.vae.config.edm_scale / edm_std
-        else:
-            init_latents = self.vae.config.scaling_factor * init_latents
+            if use_edm:
+                edm_mean = torch.tensor(self.vae.config.edm_mean, dtype=init_latents.dtype).view(1, 4, 1, 1).to(init_latents.device)
+                edm_std = torch.tensor(self.vae.config.edm_std, dtype=init_latents.dtype).view(1, 4, 1, 1).to(init_latents.device)
+                init_latents = (init_latents - edm_mean) * self.vae.config.edm_scale / edm_std
+            else:
+                init_latents = self.vae.config.scaling_factor * init_latents
 
         if batch_size > init_latents.shape[0] and batch_size % init_latents.shape[0] == 0:
             # expand init_latents for batch_size
