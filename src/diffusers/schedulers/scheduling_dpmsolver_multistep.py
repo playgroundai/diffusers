@@ -265,7 +265,9 @@ class DPMSolverMultistepScheduler(SchedulerMixin, ConfigMixin):
         if self.config.use_karras_sigmas:
             sigmas = np.flip(sigmas).copy()
             sigmas = self._convert_to_karras(in_sigmas=sigmas, num_inference_steps=num_inference_steps)
-            timesteps = np.array([self._sigma_to_t(sigma, log_sigmas) for sigma in sigmas]).round()
+            timesteps = np.array([self._sigma_to_t(sigma, log_sigmas) for sigma in sigmas])
+            if not hasattr(self.config, "use_edm") or not self.config.use_edm:
+                timesteps = timesteps.round()
             sigma_last = [0.0] if self.euler_at_final else sigmas[-1:]
             sigmas = np.concatenate([sigmas, sigma_last]).astype(np.float32)
         elif self.config.use_lu_lambdas:
@@ -281,7 +283,11 @@ class DPMSolverMultistepScheduler(SchedulerMixin, ConfigMixin):
             sigmas = np.concatenate([sigmas, [sigma_last]]).astype(np.float32)
 
         self.sigmas = torch.from_numpy(sigmas)
-        self.timesteps = torch.from_numpy(timesteps).to(device=device, dtype=torch.int64)
+
+        if hasattr(self.config, "use_edm") and self.config.use_edm:
+            self.timesteps = torch.from_numpy(timesteps).to(device=device)
+        else:
+            self.timesteps = torch.from_numpy(timesteps).to(device=device, dtype=torch.int64)
 
         self.num_inference_steps = len(timesteps)
 
