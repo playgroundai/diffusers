@@ -718,7 +718,7 @@ class StableDiffusionXLImg2ImgPipeline(
             if self.vae.config.force_upcast:
                 self.vae.to(dtype)
 
-        init_latents = init_latents.to(dtype)
+            init_latents = init_latents.to(dtype)
 
         if use_edm:
             edm_mean = torch.tensor(self.vae.config.edm_mean, dtype=init_latents.dtype).view(1, 4, 1, 1).to(init_latents.device)
