@@ -1292,10 +1292,9 @@ class StableDiffusionXLPipeline(
                     latents = latents.to(next(iter(self.vae.post_quant_conv.parameters())).dtype)
 
                 if use_edm:
-                    edm_mean = torch.tensor(self.vae.config.edm_mean).view(1, 4, 1, 1).to(latents.device)
-                    edm_std = torch.tensor(self.vae.config.edm_std).view(1, 4, 1, 1).to(latents.device)
+                    edm_mean = torch.tensor(self.vae.config.edm_mean, dtype=latents.dtype).view(1, 4, 1, 1).to(latents.device)
+                    edm_std = torch.tensor(self.vae.config.edm_std, dtype=latents.dtype).view(1, 4, 1, 1).to(latents.device)
                     latents_denorm = latents * edm_std / self.vae.config.edm_scale + edm_mean
-                    latents_denorm = latents_denorm.to(torch.float16)
 
                     image = self.vae.decode(latents_denorm, return_dict=False)[0]
                 else:
