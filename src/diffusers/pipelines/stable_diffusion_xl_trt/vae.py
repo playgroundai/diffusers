@@ -14,11 +14,14 @@ class ImageOnlyVaeRunner:
         self.model.decoder.mid_block.to(dtype)
         self.set_latents_to = next(iter(self.model.post_quant_conv.parameters())).dtype
 
-    def run(self, latents):
+    def run(self, latents, latents_already_scaled = False):
         latents = latents.to(self.set_latents_to)
 
         with torch.no_grad():
-            image = self.model.decode(latents / self.model.config.scaling_factor, return_dict=False)[0]
+            if not latents_already_scaled:
+                latents = latents / self.model.config.scaling_factor
+
+            image = self.model.decode(latents, return_dict=False)[0]
 
         return image
 

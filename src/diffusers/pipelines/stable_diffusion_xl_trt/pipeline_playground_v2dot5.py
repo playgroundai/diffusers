@@ -1239,7 +1239,7 @@ class PlaygroundV2dot5Pipeline(DiffusionPipeline, FromSingleFileMixin, StableDif
                 edm_std = torch.tensor(self.vae.config.edm_std).view(
                     1, 4, 1, 1).to(latents.device, dtype=latents.dtype)
                 latents_denorm = latents * edm_std / self.vae.config.edm_scale + edm_mean
-                image = self.vae_runner.run(latents_denorm)
+                image = self.vae_runner.run(latents_denorm, latents_already_scaled=True)
 
                 # apply watermark if available
                 if self.watermark is not None:
