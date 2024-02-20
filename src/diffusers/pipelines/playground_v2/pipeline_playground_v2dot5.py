@@ -761,6 +761,9 @@ class PlaygroundV2dot5Pipeline(StableDiffusionXLPipeline):
                 edm_std = torch.tensor(self.vae.config.edm_std).view(1, 4, 1, 1).to(latents.device)
                 latents_denorm = latents * edm_std / self.vae.config.edm_scale + edm_mean
 
+                # to float
+                latents_denorm = latents_denorm.to(torch.float16)
+
                 image = self.vae.decode(latents_denorm, return_dict=False)[0]
 
                 # cast back to fp16 if needed
