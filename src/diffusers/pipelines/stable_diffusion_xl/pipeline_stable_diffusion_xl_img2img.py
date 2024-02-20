@@ -675,7 +675,7 @@ class StableDiffusionXLImg2ImgPipeline(
         return timesteps, num_inference_steps - t_start
 
     def prepare_latents(
-        self, image, timestep, batch_size, num_images_per_prompt, dtype, device, generator=None, add_noise=True
+        self, image, timestep, batch_size, num_images_per_prompt, dtype, device, generator=None, add_noise=True, use_edm=False
     ):
         if not isinstance(image, (torch.Tensor, PIL.Image.Image, list)):
             raise ValueError(
@@ -718,12 +718,14 @@ class StableDiffusionXLImg2ImgPipeline(
             if self.vae.config.force_upcast:
                 self.vae.to(dtype)
 
+        init_latents = init_latents.to(dtype)
 
+        if use_edm:
             edm_mean = torch.tensor(self.vae.config.edm_mean, dtype=init_latents.dtype).view(1, 4, 1, 1).to(init_latents.device)
             edm_std = torch.tensor(self.vae.config.edm_std, dtype=init_latents.dtype).view(1, 4, 1, 1).to(init_latents.device)
             init_latents = (init_latents - edm_mean) * self.vae.config.edm_scale / edm_std
-            init_latents = init_latents.to(dtype)
-            # init_latents = self.vae.config.scaling_factor * init_latents
+        else:
+            init_latents = self.vae.config.scaling_factor * init_latents
 
         if batch_size > init_latents.shape[0] and batch_size % init_latents.shape[0] == 0:
             # expand init_latents for batch_size
@@ -739,7 +741,6 @@ class StableDiffusionXLImg2ImgPipeline(
         if add_noise:
             shape = init_latents.shape
             noise = randn_tensor(shape, generator=generator, device=device, dtype=dtype)
-            # init_latents = torch.zeros_like(init_latents)
             # get latents
             init_latents = self.scheduler.add_noise(init_latents, noise, timestep)
 
@@ -1242,6 +1243,7 @@ class StableDiffusionXLImg2ImgPipeline(
                 device,
                 generator,
                 add_noise,
+                use_edm
             )
             # 7. Prepare extra step kwargs.
             extra_step_kwargs = self.prepare_extra_step_kwargs(generator, eta)
