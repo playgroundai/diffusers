@@ -54,7 +54,7 @@ from ...utils import (
 from ...utils.torch_utils import randn_tensor
 from ..pipeline_utils import DiffusionPipeline
 from .pipeline_output import StableDiffusionXLPipelineOutput
-
+from .edm_utils import EDMScaling, new_monkeypatched_scheduler_for_edm, swap_scheduler, edm_init_noise_sigma, edm_scaling
 
 if is_invisible_watermark_available():
     from .watermark import StableDiffusionXLWatermarker
@@ -848,6 +848,12 @@ class StableDiffusionXLPipeline(
     @property
     def num_timesteps(self):
         return self._num_timesteps
+    
+    def validate_vae_edm_scaling(self):
+        if not all(hasattr(self.vae.config, attr) for attr in ["edm_mean", "edm_std", "edm_scale"]):
+            raise ValueError(
+                "The VAE model must have the following config attributes: `edm_mean`, `edm_std`, and `edm_scale` to support EDM-style inference."
+            )
 
     @torch.no_grad()
     @replace_example_docstring(EXAMPLE_DOC_STRING)
@@ -865,6 +871,7 @@ class StableDiffusionXLPipeline(
         negative_prompt_2: Optional[Union[str, List[str]]] = None,
         num_images_per_prompt: Optional[int] = 1,
         eta: float = 0.0,
+        use_edm: bool = False,
         generator: Optional[Union[torch.Generator, List[torch.Generator]]] = None,
         latents: Optional[torch.FloatTensor] = None,
         prompt_embeds: Optional[torch.FloatTensor] = None,
@@ -1046,6 +1053,9 @@ class StableDiffusionXLPipeline(
         original_size = original_size or (height, width)
         target_size = target_size or (height, width)
 
+        if use_edm:
+            self.validate_vae_edm_scaling()
+
         # 1. Check inputs. Raise error if not correct
         self.check_inputs(
             prompt,
@@ -1104,182 +1114,210 @@ class StableDiffusionXLPipeline(
             clip_skip=self.clip_skip,
         )
 
-        # 4. Prepare timesteps
-        timesteps, num_inference_steps = retrieve_timesteps(self.scheduler, num_inference_steps, device, timesteps)
+        monkeypatched_scheduler = self.scheduler
 
-        # 5. Prepare latent variables
-        num_channels_latents = self.unet.config.in_channels
-        latents = self.prepare_latents(
-            batch_size * num_images_per_prompt,
-            num_channels_latents,
-            height,
-            width,
-            prompt_embeds.dtype,
-            device,
-            generator,
-            latents,
-        )
+        if use_edm:
+            monkeypatched_scheduler = new_monkeypatched_scheduler_for_edm(self.scheduler)
 
-        # 6. Prepare extra step kwargs. TODO: Logic should ideally just be moved out of the pipeline
-        extra_step_kwargs = self.prepare_extra_step_kwargs(generator, eta)
+        with swap_scheduler(self, monkeypatched_scheduler):
+            # 4. Prepare timesteps
+            timesteps, num_inference_steps = retrieve_timesteps(self.scheduler, num_inference_steps, device, timesteps)
 
-        # 7. Prepare added time ids & embeddings
-        add_text_embeds = pooled_prompt_embeds
-        if self.text_encoder_2 is None:
-            text_encoder_projection_dim = int(pooled_prompt_embeds.shape[-1])
-        else:
-            text_encoder_projection_dim = self.text_encoder_2.config.projection_dim
+            # 5. Prepare latent variables
+            num_channels_latents = self.unet.config.in_channels
+            latents = self.prepare_latents(
+                batch_size * num_images_per_prompt,
+                num_channels_latents,
+                height,
+                width,
+                prompt_embeds.dtype,
+                device,
+                generator,
+                latents,
+            )
 
-        add_time_ids = self._get_add_time_ids(
-            original_size,
-            crops_coords_top_left,
-            target_size,
-            dtype=prompt_embeds.dtype,
-            text_encoder_projection_dim=text_encoder_projection_dim,
-        )
-        if negative_original_size is not None and negative_target_size is not None:
-            negative_add_time_ids = self._get_add_time_ids(
-                negative_original_size,
-                negative_crops_coords_top_left,
-                negative_target_size,
+            # 6. Prepare extra step kwargs. TODO: Logic should ideally just be moved out of the pipeline
+            extra_step_kwargs = self.prepare_extra_step_kwargs(generator, eta)
+
+            # 7. Prepare added time ids & embeddings
+            add_text_embeds = pooled_prompt_embeds
+            if self.text_encoder_2 is None:
+                text_encoder_projection_dim = int(pooled_prompt_embeds.shape[-1])
+            else:
+                text_encoder_projection_dim = self.text_encoder_2.config.projection_dim
+
+            add_time_ids = self._get_add_time_ids(
+                original_size,
+                crops_coords_top_left,
+                target_size,
                 dtype=prompt_embeds.dtype,
                 text_encoder_projection_dim=text_encoder_projection_dim,
             )
-        else:
-            negative_add_time_ids = add_time_ids
-
-        if self.do_classifier_free_guidance:
-            prompt_embeds = torch.cat([negative_prompt_embeds, prompt_embeds], dim=0)
-            add_text_embeds = torch.cat([negative_pooled_prompt_embeds, add_text_embeds], dim=0)
-            add_time_ids = torch.cat([negative_add_time_ids, add_time_ids], dim=0)
-
-        prompt_embeds = prompt_embeds.to(device)
-        add_text_embeds = add_text_embeds.to(device)
-        add_time_ids = add_time_ids.to(device).repeat(batch_size * num_images_per_prompt, 1)
-
-        if ip_adapter_image is not None:
-            output_hidden_state = False if isinstance(self.unet.encoder_hid_proj, ImageProjection) else True
-            image_embeds, negative_image_embeds = self.encode_image(
-                ip_adapter_image, device, num_images_per_prompt, output_hidden_state
-            )
-            if self.do_classifier_free_guidance:
-                image_embeds = torch.cat([negative_image_embeds, image_embeds])
-                image_embeds = image_embeds.to(device)
-
-        # 8. Denoising loop
-        num_warmup_steps = max(len(timesteps) - num_inference_steps * self.scheduler.order, 0)
-
-        # 8.1 Apply denoising_end
-        if (
-            self.denoising_end is not None
-            and isinstance(self.denoising_end, float)
-            and self.denoising_end > 0
-            and self.denoising_end < 1
-        ):
-            discrete_timestep_cutoff = int(
-                round(
-                    self.scheduler.config.num_train_timesteps
-                    - (self.denoising_end * self.scheduler.config.num_train_timesteps)
+            if negative_original_size is not None and negative_target_size is not None:
+                negative_add_time_ids = self._get_add_time_ids(
+                    negative_original_size,
+                    negative_crops_coords_top_left,
+                    negative_target_size,
+                    dtype=prompt_embeds.dtype,
+                    text_encoder_projection_dim=text_encoder_projection_dim,
                 )
-            )
-            num_inference_steps = len(list(filter(lambda ts: ts >= discrete_timestep_cutoff, timesteps)))
-            timesteps = timesteps[:num_inference_steps]
+            else:
+                negative_add_time_ids = add_time_ids
 
-        # 9. Optionally get Guidance Scale Embedding
-        timestep_cond = None
-        if self.unet.config.time_cond_proj_dim is not None:
-            guidance_scale_tensor = torch.tensor(self.guidance_scale - 1).repeat(batch_size * num_images_per_prompt)
-            timestep_cond = self.get_guidance_scale_embedding(
-                guidance_scale_tensor, embedding_dim=self.unet.config.time_cond_proj_dim
-            ).to(device=device, dtype=latents.dtype)
+            if self.do_classifier_free_guidance:
+                prompt_embeds = torch.cat([negative_prompt_embeds, prompt_embeds], dim=0)
+                add_text_embeds = torch.cat([negative_pooled_prompt_embeds, add_text_embeds], dim=0)
+                add_time_ids = torch.cat([negative_add_time_ids, add_time_ids], dim=0)
 
-        self._num_timesteps = len(timesteps)
-        with self.progress_bar(total=num_inference_steps) as progress_bar:
-            for i, t in enumerate(timesteps):
-                # expand the latents if we are doing classifier free guidance
-                latent_model_input = torch.cat([latents] * 2) if self.do_classifier_free_guidance else latents
+            prompt_embeds = prompt_embeds.to(device)
+            add_text_embeds = add_text_embeds.to(device)
+            add_time_ids = add_time_ids.to(device).repeat(batch_size * num_images_per_prompt, 1)
 
-                latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
-
-                # predict the noise residual
-                added_cond_kwargs = {"text_embeds": add_text_embeds, "time_ids": add_time_ids}
-                if ip_adapter_image is not None:
-                    added_cond_kwargs["image_embeds"] = image_embeds
-                noise_pred = self.unet(
-                    latent_model_input,
-                    t,
-                    encoder_hidden_states=prompt_embeds,
-                    timestep_cond=timestep_cond,
-                    cross_attention_kwargs=self.cross_attention_kwargs,
-                    added_cond_kwargs=added_cond_kwargs,
-                    return_dict=False,
-                )[0]
-
-                # perform guidance
+            if ip_adapter_image is not None:
+                output_hidden_state = False if isinstance(self.unet.encoder_hid_proj, ImageProjection) else True
+                image_embeds, negative_image_embeds = self.encode_image(
+                    ip_adapter_image, device, num_images_per_prompt, output_hidden_state
+                )
                 if self.do_classifier_free_guidance:
-                    noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
-                    noise_pred = noise_pred_uncond + self.guidance_scale * (noise_pred_text - noise_pred_uncond)
+                    image_embeds = torch.cat([negative_image_embeds, image_embeds])
+                    image_embeds = image_embeds.to(device)
 
-                if self.do_classifier_free_guidance and self.guidance_rescale > 0.0:
-                    # Based on 3.4. in https://arxiv.org/pdf/2305.08891.pdf
-                    noise_pred = rescale_noise_cfg(noise_pred, noise_pred_text, guidance_rescale=self.guidance_rescale)
+            # 8. Denoising loop
+            num_warmup_steps = max(len(timesteps) - num_inference_steps * self.scheduler.order, 0)
 
-                # compute the previous noisy sample x_t -> x_t-1
-                latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs, return_dict=False)[0]
-
-                if callback_on_step_end is not None:
-                    callback_kwargs = {}
-                    for k in callback_on_step_end_tensor_inputs:
-                        callback_kwargs[k] = locals()[k]
-                    callback_outputs = callback_on_step_end(self, i, t, callback_kwargs)
-
-                    latents = callback_outputs.pop("latents", latents)
-                    prompt_embeds = callback_outputs.pop("prompt_embeds", prompt_embeds)
-                    negative_prompt_embeds = callback_outputs.pop("negative_prompt_embeds", negative_prompt_embeds)
-                    add_text_embeds = callback_outputs.pop("add_text_embeds", add_text_embeds)
-                    negative_pooled_prompt_embeds = callback_outputs.pop(
-                        "negative_pooled_prompt_embeds", negative_pooled_prompt_embeds
+            # 8.1 Apply denoising_end
+            if (
+                self.denoising_end is not None
+                and isinstance(self.denoising_end, float)
+                and self.denoising_end > 0
+                and self.denoising_end < 1
+            ):
+                discrete_timestep_cutoff = int(
+                    round(
+                        self.scheduler.config.num_train_timesteps
+                        - (self.denoising_end * self.scheduler.config.num_train_timesteps)
                     )
-                    add_time_ids = callback_outputs.pop("add_time_ids", add_time_ids)
-                    negative_add_time_ids = callback_outputs.pop("negative_add_time_ids", negative_add_time_ids)
+                )
+                num_inference_steps = len(list(filter(lambda ts: ts >= discrete_timestep_cutoff, timesteps)))
+                timesteps = timesteps[:num_inference_steps]
 
-                # call the callback, if provided
-                if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
-                    progress_bar.update()
-                    if callback is not None and i % callback_steps == 0:
-                        step_idx = i // getattr(self.scheduler, "order", 1)
-                        callback(step_idx, t, latents)
+            # 9. Optionally get Guidance Scale Embedding
+            timestep_cond = None
+            if self.unet.config.time_cond_proj_dim is not None:
+                guidance_scale_tensor = torch.tensor(self.guidance_scale - 1).repeat(batch_size * num_images_per_prompt)
+                timestep_cond = self.get_guidance_scale_embedding(
+                    guidance_scale_tensor, embedding_dim=self.unet.config.time_cond_proj_dim
+                ).to(device=device, dtype=latents.dtype)
 
-                if XLA_AVAILABLE:
-                    xm.mark_step()
+            self._num_timesteps = len(timesteps)
+            with self.progress_bar(total=num_inference_steps) as progress_bar:
+                for i, t in enumerate(timesteps):
+                    # expand the latents if we are doing classifier free guidance
+                    latent_model_input = torch.cat([latents] * 2) if self.do_classifier_free_guidance else latents
 
-        if not output_type == "latent":
-            # make sure the VAE is in float32 mode, as it overflows in float16
-            needs_upcasting = self.vae.dtype == torch.float16 and self.vae.config.force_upcast
+                    timestep_param = t
 
-            if needs_upcasting:
-                self.upcast_vae()
-                latents = latents.to(next(iter(self.vae.post_quant_conv.parameters())).dtype)
+                    if use_edm:
+                        c_skip, c_out, c_in, c_noise = edm_scaling(t)
+                        # HACK: we trick the scheduler to think that the scale_input method was called
+                        self.scheduler.is_scale_input_called = True
+                        original_latent_model_input = latent_model_input
+                        latent_model_input = latent_model_input * c_in
+                        timestep_param = c_noise
+                    else:
+                        latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
 
-            image = self.vae.decode(latents / self.vae.config.scaling_factor, return_dict=False)[0]
 
-            # cast back to fp16 if needed
-            if needs_upcasting:
-                self.vae.to(dtype=torch.float16)
-        else:
-            image = latents
+                    # predict the noise residual
+                    added_cond_kwargs = {"text_embeds": add_text_embeds, "time_ids": add_time_ids}
+                    if ip_adapter_image is not None:
+                        added_cond_kwargs["image_embeds"] = image_embeds
+                    noise_pred = self.unet(
+                        latent_model_input,
+                        timestep_param,
+                        encoder_hidden_states=prompt_embeds,
+                        timestep_cond=timestep_cond,
+                        cross_attention_kwargs=self.cross_attention_kwargs,
+                        added_cond_kwargs=added_cond_kwargs,
+                        return_dict=False,
+                    )[0]
 
-        if not output_type == "latent":
-            # apply watermark if available
-            if self.watermark is not None:
-                image = self.watermark.apply_watermark(image)
+                    if use_edm:
+                        noise_pred = noise_pred * c_out + original_latent_model_input * c_skip
 
-            image = self.image_processor.postprocess(image, output_type=output_type)
+                    # perform guidance
+                    if self.do_classifier_free_guidance:
+                        noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
+                        noise_pred = noise_pred_uncond + self.guidance_scale * (noise_pred_text - noise_pred_uncond)
 
-        # Offload all models
-        self.maybe_free_model_hooks()
+                    if self.do_classifier_free_guidance and self.guidance_rescale > 0.0:
+                        # Based on 3.4. in https://arxiv.org/pdf/2305.08891.pdf
+                        noise_pred = rescale_noise_cfg(noise_pred, noise_pred_text, guidance_rescale=self.guidance_rescale)
 
-        if not return_dict:
-            return (image,)
+                    # compute the previous noisy sample x_t -> x_t-1
+                    latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs, return_dict=False)[0]
 
-        return StableDiffusionXLPipelineOutput(images=image)
+                    if callback_on_step_end is not None:
+                        callback_kwargs = {}
+                        for k in callback_on_step_end_tensor_inputs:
+                            callback_kwargs[k] = locals()[k]
+                        callback_outputs = callback_on_step_end(self, i, t, callback_kwargs)
+
+                        latents = callback_outputs.pop("latents", latents)
+                        prompt_embeds = callback_outputs.pop("prompt_embeds", prompt_embeds)
+                        negative_prompt_embeds = callback_outputs.pop("negative_prompt_embeds", negative_prompt_embeds)
+                        add_text_embeds = callback_outputs.pop("add_text_embeds", add_text_embeds)
+                        negative_pooled_prompt_embeds = callback_outputs.pop(
+                            "negative_pooled_prompt_embeds", negative_pooled_prompt_embeds
+                        )
+                        add_time_ids = callback_outputs.pop("add_time_ids", add_time_ids)
+                        negative_add_time_ids = callback_outputs.pop("negative_add_time_ids", negative_add_time_ids)
+
+                    # call the callback, if provided
+                    if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
+                        progress_bar.update()
+                        if callback is not None and i % callback_steps == 0:
+                            step_idx = i // getattr(self.scheduler, "order", 1)
+                            callback(step_idx, t, latents)
+
+                    if XLA_AVAILABLE:
+                        xm.mark_step()
+
+            if not output_type == "latent":
+                # make sure the VAE is in float32 mode, as it overflows in float16
+                needs_upcasting = self.vae.dtype == torch.float16 and self.vae.config.force_upcast
+
+                if needs_upcasting:
+                    self.upcast_vae()
+                    latents = latents.to(next(iter(self.vae.post_quant_conv.parameters())).dtype)
+
+                if use_edm:
+                    edm_mean = torch.tensor(self.vae.config.edm_mean).view(1, 4, 1, 1).to(latents.device)
+                    edm_std = torch.tensor(self.vae.config.edm_std).view(1, 4, 1, 1).to(latents.device)
+                    latents_denorm = latents * edm_std / self.vae.config.edm_scale + edm_mean
+                    latents_denorm = latents_denorm.to(torch.float16)
+
+                    image = self.vae.decode(latents_denorm, return_dict=False)[0]
+                else:
+                    image = self.vae.decode(latents / self.vae.config.scaling_factor, return_dict=False)[0]
+
+                # cast back to fp16 if needed
+                if needs_upcasting:
+                    self.vae.to(dtype=torch.float16)
+            else:
+                image = latents
+
+            if not output_type == "latent":
+                # apply watermark if available
+                if self.watermark is not None:
+                    image = self.watermark.apply_watermark(image)
+
+                image = self.image_processor.postprocess(image, output_type=output_type)
+
+            # Offload all models
+            self.maybe_free_model_hooks()
+
+            if not return_dict:
+                return (image,)
+
+            return StableDiffusionXLPipelineOutput(images=image)
