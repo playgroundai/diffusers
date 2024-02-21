@@ -54,7 +54,7 @@ from ...utils import (
 from ...utils.torch_utils import randn_tensor
 from ..pipeline_utils import DiffusionPipeline
 from .pipeline_output import StableDiffusionXLPipelineOutput
-from .edm_utils import EDMScaling, new_monkeypatched_scheduler_for_edm, swap_scheduler, edm_init_noise_sigma, edm_scaling
+from ..edm_utils import EDMScaling, new_monkeypatched_scheduler_for_edm, swap_scheduler, edm_init_noise_sigma, edm_scaling
 
 if is_invisible_watermark_available():
     from .watermark import StableDiffusionXLWatermarker

@@ -50,6 +50,13 @@ else:
         "DiffusionPipeline",
         "ImagePipelineOutput",
     ]
+    _import_structure["edm_utils"] = [
+        "EDMScaling",
+        "edm_scaling",
+        "new_monkeypatched_scheduler_for_edm",
+        "swap_scheduler",
+        "edm_init_noise_sigma",
+    ]
     _import_structure["deprecated"].extend(
         [
             "PNDMPipeline",
@@ -333,6 +340,7 @@ if TYPE_CHECKING or DIFFUSERS_SLOW_IMPORT:
             DiffusionPipeline,
             ImagePipelineOutput,
         )
+        from .edm_utils import EDMScaling, edm_init_noise_sigma, edm_scaling, new_monkeypatched_scheduler_for_edm, swap_scheduler
 
     try:
         if not (is_torch_available() and is_librosa_available()):
