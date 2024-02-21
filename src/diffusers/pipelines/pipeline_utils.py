@@ -1,5 +1,5 @@
 # coding=utf-8
-# Copyright 2023 The HuggingFace Inc. team.
+# Copyright 2024 The HuggingFace Inc. team.
 # Copyright (c) 2022, NVIDIA CORPORATION.  All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -13,7 +13,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
 import fnmatch
 import importlib
 import inspect
@@ -27,6 +26,7 @@ from typing import Any, Callable, Dict, List, Optional, Union
 
 import numpy as np
 import PIL.Image
+import requests
 import torch
 from huggingface_hub import (
     ModelCard,
@@ -35,7 +35,7 @@ from huggingface_hub import (
     model_info,
     snapshot_download,
 )
-from huggingface_hub.utils import validate_hf_hub_args
+from huggingface_hub.utils import OfflineModeIsEnabled, validate_hf_hub_args
 from packaging import version
 from requests.exceptions import HTTPError
 from tqdm.auto import tqdm
@@ -60,6 +60,7 @@ from ..utils import (
     logging,
     numpy_to_pil,
 )
+from ..utils.hub_utils import load_or_create_model_card, populate_model_card
 from ..utils.torch_utils import is_compiled_module
 
 
@@ -351,7 +352,7 @@ def get_class_obj_and_candidates(
 
 def _get_pipeline_class(
     class_obj,
-    config,
+    config=None,
     load_connected_pipeline=False,
     custom_pipeline=None,
     repo_id=None,
@@ -389,7 +390,12 @@ def _get_pipeline_class(
         return class_obj
 
     diffusers_module = importlib.import_module(class_obj.__module__.split(".")[0])
-    class_name = config["_class_name"]
+    class_name = class_name or config["_class_name"]
+    if not class_name:
+        raise ValueError(
+            "The class name could not be found in the configuration file. Please make sure to pass the correct `class_name`."
+        )
+
     class_name = class_name[4:] if class_name.startswith("Flax") else class_name
 
     pipeline_cls = getattr(diffusers_module, class_name)
@@ -530,6 +536,36 @@ def load_sub_model(
     return loaded_sub_model
 
 
+def _fetch_class_library_tuple(module):
+    # import it here to avoid circular import
+    diffusers_module = importlib.import_module(__name__.split(".")[0])
+    pipelines = getattr(diffusers_module, "pipelines")
+
+    # register the config from the original module, not the dynamo compiled one
+    not_compiled_module = _unwrap_model(module)
+    library = not_compiled_module.__module__.split(".")[0]
+
+    # check if the module is a pipeline module
+    module_path_items = not_compiled_module.__module__.split(".")
+    pipeline_dir = module_path_items[-2] if len(module_path_items) > 2 else None
+
+    path = not_compiled_module.__module__.split(".")
+    is_pipeline_module = pipeline_dir in path and hasattr(pipelines, pipeline_dir)
+
+    # if library is not in LOADABLE_CLASSES, then it is a custom module.
+    # Or if it's a pipeline module, then the module is inside the pipeline
+    # folder so we set the library to module name.
+    if is_pipeline_module:
+        library = pipeline_dir
+    elif library not in LOADABLE_CLASSES:
+        library = not_compiled_module.__module__
+
+    # retrieve class_name
+    class_name = not_compiled_module.__class__.__name__
+
+    return (library, class_name)
+
+
 class DiffusionPipeline(ConfigMixin, PushToHubMixin):
     r"""
     Base class for all pipelines.
@@ -556,38 +592,12 @@ class DiffusionPipeline(ConfigMixin, PushToHubMixin):
     _is_onnx = False
 
     def register_modules(self, **kwargs):
-        # import it here to avoid circular import
-        diffusers_module = importlib.import_module(__name__.split(".")[0])
-        pipelines = getattr(diffusers_module, "pipelines")
-
         for name, module in kwargs.items():
             # retrieve library
             if module is None or isinstance(module, (tuple, list)) and module[0] is None:
                 register_dict = {name: (None, None)}
             else:
-                # register the config from the original module, not the dynamo compiled one
-                not_compiled_module = _unwrap_model(module)
-
-                library = not_compiled_module.__module__.split(".")[0]
-
-                # check if the module is a pipeline module
-                module_path_items = not_compiled_module.__module__.split(".")
-                pipeline_dir = module_path_items[-2] if len(module_path_items) > 2 else None
-
-                path = not_compiled_module.__module__.split(".")
-                is_pipeline_module = pipeline_dir in path and hasattr(pipelines, pipeline_dir)
-
-                # if library is not in LOADABLE_CLASSES, then it is a custom module.
-                # Or if it's a pipeline module, then the module is inside the pipeline
-                # folder so we set the library to module name.
-                if is_pipeline_module:
-                    library = pipeline_dir
-                elif library not in LOADABLE_CLASSES:
-                    library = not_compiled_module.__module__
-
-                # retrieve class_name
-                class_name = not_compiled_module.__class__.__name__
-
+                library, class_name = _fetch_class_library_tuple(module)
                 register_dict = {name: (library, class_name)}
 
             # save model index config
@@ -601,7 +611,7 @@ class DiffusionPipeline(ConfigMixin, PushToHubMixin):
             # We need to overwrite the config if name exists in config
             if isinstance(getattr(self.config, name), (tuple, list)):
                 if value is not None and self.config[name][0] is not None:
-                    class_library_tuple = (value.__module__.split(".")[0], value.__class__.__name__)
+                    class_library_tuple = _fetch_class_library_tuple(value)
                 else:
                     class_library_tuple = (None, None)
 
@@ -716,6 +726,11 @@ class DiffusionPipeline(ConfigMixin, PushToHubMixin):
         self.save_config(save_directory)
 
         if push_to_hub:
+            # Create a new empty model card and eventually tag it
+            model_card = load_or_create_model_card(repo_id, token=token, is_pipeline=True)
+            model_card = populate_model_card(model_card)
+            model_card.save(os.path.join(save_directory, "README.md"))
+
             self._upload_folder(
                 save_directory,
                 repo_id,
@@ -760,31 +775,9 @@ class DiffusionPipeline(ConfigMixin, PushToHubMixin):
         Returns:
             [`DiffusionPipeline`]: The pipeline converted to specified `dtype` and/or `dtype`.
         """
-
-        torch_dtype = kwargs.pop("torch_dtype", None)
-        if torch_dtype is not None:
-            deprecate("torch_dtype", "0.27.0", "")
-        torch_device = kwargs.pop("torch_device", None)
-        if torch_device is not None:
-            deprecate("torch_device", "0.27.0", "")
-
-        dtype_kwarg = kwargs.pop("dtype", None)
-        device_kwarg = kwargs.pop("device", None)
+        dtype = kwargs.pop("dtype", None)
+        device = kwargs.pop("device", None)
         silence_dtype_warnings = kwargs.pop("silence_dtype_warnings", False)
-
-        if torch_dtype is not None and dtype_kwarg is not None:
-            raise ValueError(
-                "You have passed both `torch_dtype` and `dtype` as a keyword argument. Please make sure to only pass `dtype`."
-            )
-
-        dtype = torch_dtype or dtype_kwarg
-
-        if torch_device is not None and device_kwarg is not None:
-            raise ValueError(
-                "You have passed both `torch_device` and `device` as a keyword argument. Please make sure to only pass `device`."
-            )
-
-        device = torch_device or device_kwarg
 
         dtype_arg = None
         device_arg = None
@@ -858,12 +851,12 @@ class DiffusionPipeline(ConfigMixin, PushToHubMixin):
 
             if is_loaded_in_8bit and dtype is not None:
                 logger.warning(
-                    f"The module '{module.__class__.__name__}' has been loaded in 8bit and conversion to {torch_dtype} is not yet supported. Module is still in 8bit precision."
+                    f"The module '{module.__class__.__name__}' has been loaded in 8bit and conversion to {dtype} is not yet supported. Module is still in 8bit precision."
                 )
 
             if is_loaded_in_8bit and device is not None:
                 logger.warning(
-                    f"The module '{module.__class__.__name__}' has been loaded in 8bit and moving it to {torch_dtype} via `.to()` is not yet supported. Module is still on {module.device}."
+                    f"The module '{module.__class__.__name__}' has been loaded in 8bit and moving it to {dtype} via `.to()` is not yet supported. Module is still on {module.device}."
                 )
             else:
                 module.to(device, dtype)
@@ -988,10 +981,9 @@ class DiffusionPipeline(ConfigMixin, PushToHubMixin):
             revision (`str`, *optional*, defaults to `"main"`):
                 The specific model version to use. It can be a branch name, a tag name, a commit id, or any identifier
                 allowed by Git.
-            custom_revision (`str`, *optional*, defaults to `"main"`):
+            custom_revision (`str`, *optional*):
                 The specific model version to use. It can be a branch name, a tag name, or a commit id similar to
-                `revision` when loading a custom pipeline from the Hub. It can be a 🤗 Diffusers version when loading a
-                custom pipeline from GitHub, otherwise it defaults to `"main"` when loading from the Hub.
+                `revision` when loading a custom pipeline from the Hub. Defaults to the latest stable 🤗 Diffusers version.
             mirror (`str`, *optional*):
                 Mirror source to resolve accessibility issues if you’re downloading a model in China. We do not
                 guarantee the timeliness or safety of the source, and you should refer to the mirror site for more
@@ -1430,6 +1422,7 @@ class DiffusionPipeline(ConfigMixin, PushToHubMixin):
 
         device_type = torch_device.type
         device = torch.device(f"{device_type}:{self._offload_gpu_id}")
+        self._offload_device = device
 
         if self.device.type != "cpu":
             self.to("cpu", silence_dtype_warnings=True)
@@ -1479,7 +1472,7 @@ class DiffusionPipeline(ConfigMixin, PushToHubMixin):
             hook.remove()
 
         # make sure the model is in the same state as before calling it
-        self.enable_model_cpu_offload()
+        self.enable_model_cpu_offload(device=getattr(self, "_offload_device", "cuda"))
 
     def enable_sequential_cpu_offload(self, gpu_id: Optional[int] = None, device: Union[torch.device, str] = "cuda"):
         r"""
@@ -1515,6 +1508,7 @@ class DiffusionPipeline(ConfigMixin, PushToHubMixin):
 
         device_type = torch_device.type
         device = torch.device(f"{device_type}:{self._offload_gpu_id}")
+        self._offload_device = device
 
         if self.device.type != "cpu":
             self.to("cpu", silence_dtype_warnings=True)
@@ -1654,7 +1648,7 @@ class DiffusionPipeline(ConfigMixin, PushToHubMixin):
         if not local_files_only:
             try:
                 info = model_info(pretrained_model_name, token=token, revision=revision)
-            except HTTPError as e:
+            except (HTTPError, OfflineModeIsEnabled, requests.ConnectionError) as e:
                 logger.warn(f"Couldn't connect to the Hub: {e}.\nWill try to load from local cache.")
                 local_files_only = True
                 model_info_call_error = e  # save error to reraise it if model is not cached locally

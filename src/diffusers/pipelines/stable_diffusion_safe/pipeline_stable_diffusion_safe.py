@@ -361,7 +361,6 @@ class StableDiffusionPipelineSafe(DiffusionPipeline, IPAdapterMixin):
             extra_step_kwargs["generator"] = generator
         return extra_step_kwargs
 
-    # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.StableDiffusionPipeline.check_inputs
     def check_inputs(
         self,
         prompt,
@@ -595,10 +594,11 @@ class StableDiffusionPipelineSafe(DiffusionPipeline, IPAdapterMixin):
         ```py
         import torch
         from diffusers import StableDiffusionPipelineSafe
+        from diffusers.pipelines.stable_diffusion_safe import SafetyConfig
 
         pipeline = StableDiffusionPipelineSafe.from_pretrained(
             "AIML-TUDA/stable-diffusion-safe", torch_dtype=torch.float16
-        )
+        ).to("cuda")
         prompt = "the four horsewomen of the apocalypse, painting by tom of finland, gaston bussiere, craig mullins, j. c. leyendecker"
         image = pipeline(prompt=prompt, **SafetyConfig.MEDIUM).images[0]
         ```
