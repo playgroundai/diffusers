@@ -1320,13 +1320,16 @@ class StableDiffusionXLImg2ImgPipeline(
                     progress_bar.update()
 
             if not output_type == "latent":
-                # XXXPGv2.5: use the EDM scale values from https://arxiv.org/abs/2206.00364 to decode VAE latents
-                edm_mean = torch.tensor(self.vae.config.edm_mean).view(
-                    1, 4, 1, 1).to(latents.device, dtype=latents.dtype)
-                edm_std = torch.tensor(self.vae.config.edm_std).view(
-                    1, 4, 1, 1).to(latents.device, dtype=latents.dtype)
-                latents_denorm = latents * edm_std / self.vae.config.edm_scale + edm_mean
-                image = self.vae_runner.run(latents_denorm, latents_already_scaled=True)
+                if use_edm:
+                    # XXXPGv2.5: use the EDM scale values from https://arxiv.org/abs/2206.00364 to decode VAE latents
+                    edm_mean = torch.tensor(self.vae.config.edm_mean).view(
+                        1, 4, 1, 1).to(latents.device, dtype=latents.dtype)
+                    edm_std = torch.tensor(self.vae.config.edm_std).view(
+                        1, 4, 1, 1).to(latents.device, dtype=latents.dtype)
+                    latents_denorm = latents * edm_std / self.vae.config.edm_scale + edm_mean
+                    image = self.vae_runner.run(latents_denorm, latents_already_scaled=True)
+                else:
+                    image = self.vae_runner.run(latents, latents_already_scaled=False)
             else:
                 image = latents
                 return StableDiffusionXLPipelineOutput(images=image)
