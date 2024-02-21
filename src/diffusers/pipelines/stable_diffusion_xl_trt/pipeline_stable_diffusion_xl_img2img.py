@@ -1289,21 +1289,23 @@ class StableDiffusionXLImg2ImgPipeline(
             with self.progress_bar(total=num_inference_steps) as progress_bar:
                 for i, t in enumerate(timesteps):
                     # expand the latents if we are doing classifier free guidance
-                    latent_model_input = torch.cat([latents] * 2) if self.do_classifier_free_guidance else latents
+                    latents = torch.cat([latents] * 2) if self.do_classifier_free_guidance else latents
 
-                    # XXXPGv2.5: next line is commented out because we do edm scaling
-                    # latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
-
-                    # XXXPGv2.5: use the EDM scale values from https://arxiv.org/abs/2206.00364
-                    c_skip, c_out, c_in, c_noise = edm_scaling(t)  # t is sigma here
+                    if use_edm:
+                        c_skip, c_out, c_in, c_noise = edm_scaling(t)  # t is sigma here
+                        latent_model_input = latents * c_in
+                        timestep_input = c_noise
+                    else:
+                        latent_model_input = self.scheduler.scale_model_input(latents, t)
+                        timestep_input = t
 
                     # predict the noise residual
-                    self.ref_unetxl_engine.copy_into_tensor("sample", latent_model_input * c_in)
-                    self.ref_unetxl_engine.copy_into_tensor("timestep", c_noise)
+                    self.ref_unetxl_engine.copy_into_tensor("sample", latent_model_input)
+                    self.ref_unetxl_engine.copy_into_tensor("timestep", timestep_input)
                     noise_pred = self.ref_unetxl_engine.infer_using_graph(stream)["latent"]
 
-                    # XXXPGv2.5: Based on Equation 7 in https://arxiv.org/abs/2206.00364.pdf
-                    noise_pred = noise_pred * c_out + latent_model_input * c_skip
+                    if use_edm:
+                        noise_pred = noise_pred * c_out + latents * c_skip
 
                     # perform guidance
                     if self.do_classifier_free_guidance:
