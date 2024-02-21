@@ -13,7 +13,7 @@ def get_unet_embedding_dim(version, pipeline):
         return 2048
     elif version in ("xl-1.0") and pipeline.is_sd_xl_refiner():
         return 1280
-    elif version in ("pgv2"):
+    elif version in ("pgv2", "pgv2.5"):
         return 2048
     else:
         raise ValueError(f"Invalid version {version} + pipeline {pipeline}")

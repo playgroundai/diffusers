@@ -70,7 +70,7 @@ class CLIPRunner:
             return 768
         elif self.version in ("2.0", "2.0-base", "2.1", "2.1-base"):
             return 1024
-        elif self.version in ("pgv2"):
+        elif self.version in ("pgv2", "pgv2.5"):
             return 768
         elif self.version in ("xl-1.0") and self.pipeline_type.is_sd_xl_base():
             return 768

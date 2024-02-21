@@ -63,6 +63,8 @@ def get_path(version, pipeline, controlnet=None):
         return "stabilityai/stable-diffusion-2-1-base"
     elif version == "pgv2":
         return "playgroundai/playground-v2-1024px-aesthetic"
+    elif version == "pgv2.5":
+        return "playgroundai/playground-v2.5-1024px-aesthetic"
     elif version == 'xl-1.0':
         if pipeline.is_sd_xl_base():
             return "stabilityai/stable-diffusion-xl-base-1.0"
