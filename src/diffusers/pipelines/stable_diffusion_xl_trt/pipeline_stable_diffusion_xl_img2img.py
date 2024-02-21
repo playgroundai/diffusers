@@ -1289,14 +1289,14 @@ class StableDiffusionXLImg2ImgPipeline(
             with self.progress_bar(total=num_inference_steps) as progress_bar:
                 for i, t in enumerate(timesteps):
                     # expand the latents if we are doing classifier free guidance
-                    latents = torch.cat([latents] * 2) if self.do_classifier_free_guidance else latents
+                    latents_prepped_for_cfg = torch.cat([latents] * 2) if self.do_classifier_free_guidance else latents
 
                     if use_edm:
                         c_skip, c_out, c_in, c_noise = edm_scaling(t)  # t is sigma here
-                        latent_model_input = latents * c_in
+                        latent_model_input = latents_prepped_for_cfg * c_in
                         timestep_input = c_noise
                     else:
-                        latent_model_input = self.scheduler.scale_model_input(latents, t)
+                        latent_model_input = self.scheduler.scale_model_input(latents_prepped_for_cfg, t)
                         timestep_input = t
 
                     # predict the noise residual
