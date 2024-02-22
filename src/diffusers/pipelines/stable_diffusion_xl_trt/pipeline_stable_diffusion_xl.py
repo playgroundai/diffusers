@@ -49,6 +49,8 @@ from ...utils.torch_utils import randn_tensor
 from ..pipeline_utils import DiffusionPipeline
 from .pipeline_output import StableDiffusionXLPipelineOutput
 
+from ..edm_utils import new_monkeypatched_scheduler_for_edm, swap_scheduler, edm_init_noise_sigma, edm_scaling
+
 if is_invisible_watermark_available():
     from .watermark import StableDiffusionXLWatermarker
 
@@ -696,6 +698,12 @@ class StableDiffusionXLPipeline(
     def num_timesteps(self):
         return self._num_timesteps
 
+    def validate_vae_edm_scaling(self):
+        if not all(hasattr(self.vae.config, attr) for attr in ["edm_mean", "edm_std", "edm_scale"]):
+            raise ValueError(
+                "The VAE model must have the following config attributes: `edm_mean`, `edm_std`, and `edm_scale` to support EDM-style inference."
+            )
+
     @torch.no_grad()
     @replace_example_docstring(EXAMPLE_DOC_STRING)
     def __call__(
@@ -711,6 +719,7 @@ class StableDiffusionXLPipeline(
         negative_prompt_2: Optional[Union[str, List[str]]] = None,
         num_images_per_prompt: Optional[int] = 1,
         eta: float = 0.0,
+        use_edm: bool = False,
         generator: Optional[Union[torch.Generator, List[torch.Generator]]] = None,
         latents: Optional[torch.FloatTensor] = None,
         prompt_embeds: Optional[torch.FloatTensor] = None,
@@ -888,6 +897,9 @@ class StableDiffusionXLPipeline(
         original_size = original_size or (height, width)
         target_size = target_size or (height, width)
 
+        if use_edm:
+            self.validate_vae_edm_scaling()
+
         # 1. Check inputs. Raise error if not correct
         self.check_inputs(
             prompt,
@@ -946,136 +958,168 @@ class StableDiffusionXLPipeline(
             clip_skip=self.clip_skip,
         )
 
-        # 4. Prepare timesteps
-        self.scheduler.set_timesteps(num_inference_steps, device=device)
+        monkeypatched_scheduler = self.scheduler
 
-        timesteps = self.scheduler.timesteps.type(torch.HalfTensor).to(device)
+        if use_edm:
+            monkeypatched_scheduler = new_monkeypatched_scheduler_for_edm(self.scheduler)
 
-        # 5. Prepare latent variables
-        num_channels_latents = self.unet.config.in_channels
-        latents = self.prepare_latents(
-            batch_size * num_images_per_prompt,
-            num_channels_latents,
-            height,
-            width,
-            prompt_embeds.dtype,
-            device,
-            generator,
-            latents,
-        )
+        with swap_scheduler(self, monkeypatched_scheduler):
+            # 4. Prepare timesteps
+            self.scheduler.set_timesteps(num_inference_steps, device=device)
 
-        # 6. Prepare extra step kwargs. TODO: Logic should ideally just be moved out of the pipeline
-        extra_step_kwargs = self.prepare_extra_step_kwargs(generator, eta)
+            timesteps = self.scheduler.timesteps.type(torch.HalfTensor).to(device)
 
-        # 7. Prepare added time ids & embeddings
-        add_text_embeds = pooled_prompt_embeds
-        text_encoder_projection_dim = int(pooled_prompt_embeds.shape[-1])
+            # XXXPGv2.5: init the EDM noise sigma
+            try:
+                # HACK: we always set init_noise_sigma the same way, regardless of scheduler
+                self.scheduler.init_noise_sigma = edm_init_noise_sigma(self.scheduler)
+            except AttributeError:
+                pass
 
-        add_time_ids = self._get_add_time_ids(
-            original_size,
-            crops_coords_top_left,
-            target_size,
-            dtype=prompt_embeds.dtype,
-            text_encoder_projection_dim=text_encoder_projection_dim,
-        )
-        if negative_original_size is not None and negative_target_size is not None:
-            negative_add_time_ids = self._get_add_time_ids(
-                negative_original_size,
-                negative_crops_coords_top_left,
-                negative_target_size,
+            # 5. Prepare latent variables
+            num_channels_latents = self.unet.config.in_channels
+            latents = self.prepare_latents(
+                batch_size * num_images_per_prompt,
+                num_channels_latents,
+                height,
+                width,
+                prompt_embeds.dtype,
+                device,
+                generator,
+                latents,
+            )
+
+            # 6. Prepare extra step kwargs. TODO: Logic should ideally just be moved out of the pipeline
+            extra_step_kwargs = self.prepare_extra_step_kwargs(generator, eta)
+
+            # 7. Prepare added time ids & embeddings
+            add_text_embeds = pooled_prompt_embeds
+            text_encoder_projection_dim = int(pooled_prompt_embeds.shape[-1])
+
+            add_time_ids = self._get_add_time_ids(
+                original_size,
+                crops_coords_top_left,
+                target_size,
                 dtype=prompt_embeds.dtype,
                 text_encoder_projection_dim=text_encoder_projection_dim,
             )
-        else:
-            negative_add_time_ids = add_time_ids
-
-        if self.do_classifier_free_guidance:
-            prompt_embeds = torch.cat([negative_prompt_embeds, prompt_embeds], dim=0)
-            add_text_embeds = torch.cat([negative_pooled_prompt_embeds, add_text_embeds], dim=0)
-            add_time_ids = torch.cat([negative_add_time_ids, add_time_ids], dim=0)
-
-        add_time_ids = add_time_ids.to(device).repeat(batch_size * num_images_per_prompt, 1)
-
-        # 8. Denoising loop
-        num_warmup_steps = max(len(timesteps) - num_inference_steps * self.scheduler.order, 0)
-
-        # 8.1 Apply denoising_end
-        if (
-            self.denoising_end is not None
-            and isinstance(self.denoising_end, float)
-            and self.denoising_end > 0
-            and self.denoising_end < 1
-        ):
-            discrete_timestep_cutoff = int(
-                round(
-                    self.scheduler.config.num_train_timesteps
-                    - (self.denoising_end * self.scheduler.config.num_train_timesteps)
+            if negative_original_size is not None and negative_target_size is not None:
+                negative_add_time_ids = self._get_add_time_ids(
+                    negative_original_size,
+                    negative_crops_coords_top_left,
+                    negative_target_size,
+                    dtype=prompt_embeds.dtype,
+                    text_encoder_projection_dim=text_encoder_projection_dim,
                 )
-            )
-            num_inference_steps = len(list(filter(lambda ts: ts >= discrete_timestep_cutoff, timesteps)))
-            timesteps = timesteps[:num_inference_steps]
+            else:
+                negative_add_time_ids = add_time_ids
 
-        stream = torch.cuda.current_stream().cuda_stream
-        # 9. Optionally get Guidance Scale Embedding
-        timestep_cond = None
-        if self.unet.config.time_cond_proj_dim is not None:
-            guidance_scale_tensor = torch.tensor(self.guidance_scale - 1).repeat(batch_size * num_images_per_prompt)
-            timestep_cond = self.get_guidance_scale_embedding(
-                guidance_scale_tensor, embedding_dim=self.unet.config.time_cond_proj_dim
-            ).to(device=device, dtype=latents.dtype)
+            if self.do_classifier_free_guidance:
+                prompt_embeds = torch.cat([negative_prompt_embeds, prompt_embeds], dim=0)
+                add_text_embeds = torch.cat([negative_pooled_prompt_embeds, add_text_embeds], dim=0)
+                add_time_ids = torch.cat([negative_add_time_ids, add_time_ids], dim=0)
 
-        self._num_timesteps = len(timesteps)
+            add_time_ids = add_time_ids.to(device).repeat(batch_size * num_images_per_prompt, 1)
 
-        # These don't change during the loop, so only need to be set once.
-        self.base_unetxl_engine.copy_into_tensor("encoder_hidden_states", prompt_embeds)
-        self.base_unetxl_engine.copy_into_tensor("text_embeds", add_text_embeds)
-        self.base_unetxl_engine.copy_into_tensor("time_ids", add_time_ids)
+            # 8. Denoising loop
+            num_warmup_steps = max(len(timesteps) - num_inference_steps * self.scheduler.order, 0)
 
-        self._num_timesteps = len(timesteps)
-        with self.progress_bar(total=num_inference_steps) as progress_bar:
-            for i, t in enumerate(timesteps):
-                # expand the latents if we are doing classifier free guidance
-                latent_model_input = torch.cat([latents] * 2) if self.do_classifier_free_guidance else latents
-                latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
+            # 8.1 Apply denoising_end
+            if (
+                self.denoising_end is not None
+                and isinstance(self.denoising_end, float)
+                and self.denoising_end > 0
+                and self.denoising_end < 1
+            ):
+                discrete_timestep_cutoff = int(
+                    round(
+                        self.scheduler.config.num_train_timesteps
+                        - (self.denoising_end * self.scheduler.config.num_train_timesteps)
+                    )
+                )
+                num_inference_steps = len(list(filter(lambda ts: ts >= discrete_timestep_cutoff, timesteps)))
+                timesteps = timesteps[:num_inference_steps]
 
-                # predict the noise residual
-                self.base_unetxl_engine.copy_into_tensor("sample", latent_model_input)
+            stream = torch.cuda.current_stream().cuda_stream
+            # 9. Optionally get Guidance Scale Embedding
+            timestep_cond = None
+            if self.unet.config.time_cond_proj_dim is not None:
+                guidance_scale_tensor = torch.tensor(self.guidance_scale - 1).repeat(batch_size * num_images_per_prompt)
+                timestep_cond = self.get_guidance_scale_embedding(
+                    guidance_scale_tensor, embedding_dim=self.unet.config.time_cond_proj_dim
+                ).to(device=device, dtype=latents.dtype)
 
-                # Could avoid copying this one, but then we wouldn't be able to use the graph API since the pointer
-                # would change in every iteration. Curently, that's slower than just doing this very silly copy.
-                self.base_unetxl_engine.copy_into_tensor("timestep", t)
+            self._num_timesteps = len(timesteps)
 
-                noise_pred = self.base_unetxl_engine.infer_using_graph(stream)["latent"]
+            # These don't change during the loop, so only need to be set once.
+            self.base_unetxl_engine.copy_into_tensor("encoder_hidden_states", prompt_embeds)
+            self.base_unetxl_engine.copy_into_tensor("text_embeds", add_text_embeds)
+            self.base_unetxl_engine.copy_into_tensor("time_ids", add_time_ids)
 
-                # perform guidance
-                if self.do_classifier_free_guidance:
-                    noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
-                    noise_pred = noise_pred_uncond + self.guidance_scale * (noise_pred_text - noise_pred_uncond)
+            self._num_timesteps = len(timesteps)
+            with self.progress_bar(total=num_inference_steps) as progress_bar:
+                for i, t in enumerate(timesteps):
+                    # expand the latents if we are doing classifier free guidance
+                    latents = torch.cat([latents] * 2) if self.do_classifier_free_guidance else latents
 
-                    if self.guidance_rescale > 0.0:
-                        # Based on 3.4. in https://arxiv.org/pdf/2305.08891.pdf
-                        noise_pred = rescale_noise_cfg(noise_pred, noise_pred_text, guidance_rescale=self.guidance_rescale)
+                    if use_edm:
+                        c_skip, c_out, c_in, c_noise = edm_scaling(t)  # t is sigma here
+                        latent_model_input = latents * c_in
+                        timestep_input = c_noise
+                    else:
+                        latent_model_input = self.scheduler.scale_model_input(latents, t)
+                        timestep_input = t
 
-                # compute the previous noisy sample x_t -> x_t-1
-                latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs, return_dict=False)[0]
+                    # predict the noise residual
+                    self.base_unetxl_engine.copy_into_tensor("sample", latent_model_input)
 
-                progress_bar.update()
+                    # Could avoid copying this one, but then we wouldn't be able to use the graph API since the pointer
+                    # would change in every iteration. Curently, that's slower than just doing this very silly copy.
+                    self.base_unetxl_engine.copy_into_tensor("timestep", timestep_input)
 
-        if output_type == "latent":
-            image = latents
-        else:
-            image = self.vae_runner.run(latents)
+                    noise_pred = self.base_unetxl_engine.infer_using_graph(stream)["latent"]
 
-            # apply watermark if available
-            if self.watermark is not None:
-                image = self.watermark.apply_watermark(image)
+                    if use_edm:
+                        noise_pred = noise_pred * c_out + latent_model_input * c_skip
 
-            image = self.image_processor.postprocess(image, output_type=output_type)
+                    # perform guidance
+                    if self.do_classifier_free_guidance:
+                        noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
+                        noise_pred = noise_pred_uncond + self.guidance_scale * (noise_pred_text - noise_pred_uncond)
 
-        # Offload all models
-        self.maybe_free_model_hooks()
+                        if self.guidance_rescale > 0.0:
+                            # Based on 3.4. in https://arxiv.org/pdf/2305.08891.pdf
+                            noise_pred = rescale_noise_cfg(noise_pred, noise_pred_text, guidance_rescale=self.guidance_rescale)
 
-        if not return_dict:
-            return (image,)
+                    # compute the previous noisy sample x_t -> x_t-1
+                    latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs, return_dict=False)[0]
 
-        return StableDiffusionXLPipelineOutput(images=image)
+                    progress_bar.update()
+
+            if output_type == "latent":
+                image = latents
+            else:
+                if use_edm:
+                    # XXXPGv2.5: use the EDM scale values from https://arxiv.org/abs/2206.00364 to decode VAE latents
+                    edm_mean = torch.tensor(self.vae.config.edm_mean).view(
+                        1, 4, 1, 1).to(latents.device, dtype=latents.dtype)
+                    edm_std = torch.tensor(self.vae.config.edm_std).view(
+                        1, 4, 1, 1).to(latents.device, dtype=latents.dtype)
+                    latents_denorm = latents * edm_std / self.vae.config.edm_scale + edm_mean
+                    image = self.vae_runner.run(latents_denorm, latents_already_scaled=True)
+                else:
+                    image = self.vae_runner.run(latents, latents_already_scaled=False)
+
+                # apply watermark if available
+                if self.watermark is not None:
+                    image = self.watermark.apply_watermark(image)
+
+                image = self.image_processor.postprocess(image, output_type=output_type)
+
+            # Offload all models
+            self.maybe_free_model_hooks()
+
+            if not return_dict:
+                return (image,)
+
+            return StableDiffusionXLPipelineOutput(images=image)
