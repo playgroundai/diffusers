@@ -47,6 +47,7 @@ import diffusers
 from diffusers import (
     AutoencoderKL,
     EulerDiscreteScheduler,
+    StableDiffusionXLPipeline,
     PlaygroundV2dot5Pipeline,
     UNet2DConditionModel,
 )
