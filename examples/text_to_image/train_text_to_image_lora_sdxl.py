@@ -603,6 +603,9 @@ def main(args):
         revision=args.revision,
         variant=args.variant,
     )
+    vae.config.edm_mean = [-1.6574, 1.886, -1.383, 2.5155]
+    vae.config.edm_std = [8.4927, 5.9022, 6.5498, 5.2299]
+    vae.config.edm_scale = 0.5
     unet = UNet2DConditionModel.from_pretrained(
         args.pretrained_model_name_or_path, subfolder="unet", revision=args.revision, variant=args.variant
     )
