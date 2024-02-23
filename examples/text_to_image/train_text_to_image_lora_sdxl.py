@@ -34,6 +34,7 @@ from accelerate.logging import get_logger
 from accelerate.utils import DistributedDataParallelKwargs, ProjectConfiguration, set_seed
 from datasets import load_dataset
 from huggingface_hub import create_repo, upload_folder
+from inspect import isfunction
 from packaging import version
 from peft import LoraConfig, set_peft_model_state_dict
 from peft.utils import get_peft_model_state_dict
@@ -45,12 +46,17 @@ from transformers import AutoTokenizer, PretrainedConfig
 import diffusers
 from diffusers import (
     AutoencoderKL,
-    DDPMScheduler,
-    StableDiffusionXLPipeline,
+    EulerDiscreteScheduler,
+    PlaygroundV2dot5Pipeline,
     UNet2DConditionModel,
 )
 from diffusers.loaders import LoraLoaderMixin
 from diffusers.optimization import get_scheduler
+from diffusers.pipelines.playground_v2.pipeline_playground_v2dot5 import (
+    new_monkeypatched_scheduler_for_edm,
+    edm_init_noise_sigma,
+    EDMScaling,
+)
 from diffusers.training_utils import _set_state_dict_into_text_encoder, cast_training_params, compute_snr
 from diffusers.utils import (
     check_min_version,
@@ -480,6 +486,22 @@ def encode_prompt(text_encoders, tokenizers, prompt, text_input_ids_list=None):
     return prompt_embeds, pooled_prompt_embeds
 
 
+def default(val, d):
+    if val is not None:
+        return val
+    return d() if isfunction(d) else d
+
+
+class EDMSampling:
+    def __init__(self, p_mean=-0.4, p_std=1.0):
+        self.p_mean = p_mean
+        self.p_std = p_std
+
+    def __call__(self, n_samples, rand=None):
+        log_sigma = self.p_mean + self.p_std * default(rand, torch.randn((n_samples,)))
+        return log_sigma.exp()
+
+
 def main(args):
     if args.report_to == "wandb" and args.hub_token is not None:
         raise ValueError(
@@ -557,7 +579,12 @@ def main(args):
     )
 
     # Load scheduler and models
-    noise_scheduler = DDPMScheduler.from_pretrained(args.pretrained_model_name_or_path, subfolder="scheduler")
+    EulerDiscreteScheduler.init_noise_sigma = property(edm_init_noise_sigma)
+    noise_scheduler = (
+        new_monkeypatched_scheduler_for_edm(EulerDiscreteScheduler.from_pretrained(
+            args.pretrained_model_name_or_path, subfolder="scheduler"
+        ))
+    )
     text_encoder_one = text_encoder_cls_one.from_pretrained(
         args.pretrained_model_name_or_path, subfolder="text_encoder", revision=args.revision, variant=args.variant
     )
@@ -992,6 +1019,9 @@ def main(args):
     else:
         initial_global_step = 0
 
+    edm_scaling = EDMScaling()
+    edm_sampling = EDMSampling()
+
     progress_bar = tqdm(
         range(0, args.max_train_steps),
         initial=initial_global_step,
@@ -1015,7 +1045,19 @@ def main(args):
                     pixel_values = batch["pixel_values"]
 
                 model_input = vae.encode(pixel_values).latent_dist.sample()
-                model_input = model_input * vae.config.scaling_factor
+
+                edm_mean = (
+                    torch.tensor(vae.config.edm_mean)
+                    .view(1, 4, 1, 1)
+                    .to(model_input.device)
+                )
+                edm_std = (
+                    torch.tensor(vae.config.edm_std)
+                    .view(1, 4, 1, 1)
+                    .to(model_input.device)
+                )
+
+                model_input = (model_input - edm_mean) * vae.config.edm_scale / edm_std
                 if args.pretrained_vae_model_name_or_path is None:
                     model_input = model_input.to(weight_dtype)
 
@@ -1029,14 +1071,20 @@ def main(args):
 
                 bsz = model_input.shape[0]
                 # Sample a random timestep for each image
-                timesteps = torch.randint(
-                    0, noise_scheduler.config.num_train_timesteps, (bsz,), device=model_input.device
-                )
-                timesteps = timesteps.long()
+                sigma = edm_sampling(bsz).to(device=model_input.device)
+                # timesteps = torch.randint(
+                #     0, noise_scheduler.config.num_train_timesteps, (bsz,), device=model_input.device
+                # )
+                # timesteps = timesteps.long()
 
                 # Add noise to the model input according to the noise magnitude at each timestep
                 # (this is the forward diffusion process)
-                noisy_model_input = noise_scheduler.add_noise(model_input, noise, timesteps)
+                # noisy_model_input = noise_scheduler.add_noise(model_input, noise, timesteps)
+                noisy_model_input = model_input + noise * sigma
+
+                c_skip, c_out, c_in, c_noise = edm_scaling(sigma)
+                noise_scheduler.is_scale_input_called = True
+                noisy_model_input = noisy_model_input * c_in
 
                 # time ids
                 def compute_time_ids(original_size, crops_coords_top_left):
@@ -1062,11 +1110,13 @@ def main(args):
                 unet_added_conditions.update({"text_embeds": pooled_prompt_embeds})
                 model_pred = unet(
                     noisy_model_input,
-                    timesteps,
+                    c_noise,
                     prompt_embeds,
                     added_cond_kwargs=unet_added_conditions,
                     return_dict=False,
                 )[0]
+
+                model_pred = model_pred * c_out + noisy_model_input * c_skip
 
                 # Get the target for loss depending on the prediction type
                 if args.prediction_type is not None:
@@ -1077,6 +1127,8 @@ def main(args):
                     target = noise
                 elif noise_scheduler.config.prediction_type == "v_prediction":
                     target = noise_scheduler.get_velocity(model_input, noise, timesteps)
+                elif noise_scheduler.config.prediction_type == "sample":
+                    target = noise
                 else:
                     raise ValueError(f"Unknown prediction type {noise_scheduler.config.prediction_type}")
 
@@ -1157,7 +1209,7 @@ def main(args):
                     f" {args.validation_prompt}."
                 )
                 # create pipeline
-                pipeline = StableDiffusionXLPipeline.from_pretrained(
+                pipeline = PlaygroundV2dot5Pipeline.from_pretrained(
                     args.pretrained_model_name_or_path,
                     vae=vae,
                     text_encoder=unwrap_model(text_encoder_one),
