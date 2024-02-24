@@ -169,6 +169,7 @@ class StableDiffusionXLPipeline(
         optimized_model_dir: Optional[str] = None,
         version: Optional[str] = 'xl-1.0',
         pipeline_type: PIPELINE_TYPE = PIPELINE_TYPE.SD_XL_BASE,
+        max_batchsize: int = 1,
     ):
         super().__init__()
 
@@ -199,22 +200,26 @@ class StableDiffusionXLPipeline(
 
         stream = torch.cuda.current_stream().cuda_stream
         clip_runner = CLIPRunner(framework_model_dir=self.optimized_model_dir, output_hidden_states=True,
-                                 version=version, pipeline_type=pipeline_type, stream=stream)
-        clip_obj = clip_runner.make_clip()
-        self.base_clip_engine = clip_runner.load_engine(clip_obj, batch_size=1)
+                                 version=version, pipeline_type=pipeline_type, stream=stream,
+                                 max_batch_size=max_batchsize)
+        self.clip_obj = clip_runner.make_clip()
+        self.base_clip_engine = clip_runner.load_engine(self.clip_obj)
 
         clip2_runner = CLIP2Runner(framework_model_dir=self.optimized_model_dir, output_hidden_states=True,
-                                   version=version, pipeline_type=pipeline_type, stream=stream)
-        clip2_obj = clip2_runner.make_clip_with_proj()
-        self.base_clip2_engine = clip2_runner.load_engine(clip2_obj, batch_size=1)
+                                   version=version, pipeline_type=pipeline_type, stream=stream,
+                                   max_batch_size=max_batchsize)
+        self.clip2_obj = clip2_runner.make_clip_with_proj()
+        self.base_clip2_engine = clip2_runner.load_engine(self.clip2_obj)
 
         self.unetxl_runner = UNETXLRunnerInfer(framework_model_dir=self.optimized_model_dir, version=version,
-                                               scheduler=None, pipeline_type=pipeline_type, stream=stream)
+                                               scheduler=None, pipeline_type=pipeline_type, stream=stream,
+                                               max_batch_size=max_batchsize)
         self.base_unetxl_engine = self.unetxl_runner.load_engine()
 
         # The width/height for which the TRT modules are initialised
         self.trt_width = None
         self.trt_height = None
+        self.trt_batch = None
 
         self.vae_runner = ImageOnlyVaeRunner(self.vae)
         self.vae_runner.setup_model()
@@ -223,24 +228,28 @@ class StableDiffusionXLPipeline(
 
         # Complete warmups - should only be necessary to warmup with max img sizes
         # TODO check this is the case
-        clip_runner.warmup(self.base_clip_engine, clip_obj)
-        clip2_runner.warmup(self.base_clip2_engine, clip2_obj)
+        clip_runner.warmup(self.base_clip_engine, self.clip_obj)
+        clip2_runner.warmup(self.base_clip2_engine, self.clip2_obj)
         self.unetxl_runner.warmup(self.base_unetxl_engine, 1024, 1024)
-        self.vae_runner.warmup(1024, 1024, batch_size=1)
+        self.vae_runner.warmup(1024, 1024)
         torch.cuda.synchronize() # Wait for warmup nonsense to finish.
 
     # Reinitialise the TRT modules to operate on the given width/height, if needed.
     # This operation is very expensive, but less expensive than completely recreating the pipeline. If you have a
     # workload that's mostly images of the same size with the occasional outlier, then exploiting this functionality
     # might be beneficial.
-    def possibly_reinitialise_tensorrt(self, w, h):
-        if self.trt_width == w and self.trt_height == h:
+    def possibly_reinitialise_tensorrt(self, w, h, bs):
+        if self.trt_width == w and self.trt_height == h and self.trt_batch == bs:
             return
 
         self.trt_height = h
         self.trt_width = w
+        self.trt_batch = bs
 
-        self.base_unetxl_engine.allocate_buffers(shape_dict=self.unetxl_runner.get_shape_dict(h, w), device="cuda")
+        self.base_clip_engine.allocate_buffers(shape_dict=self.clip_obj.get_shape_dict(bs, h, w), device=self.device)
+        self.base_clip2_engine.allocate_buffers(shape_dict=self.clip2_obj.get_shape_dict(bs, h, w), device=self.device)
+        self.base_unetxl_engine.allocate_buffers(shape_dict=self.unetxl_runner.get_shape_dict(h, w, bs),
+                                                 device=self.device)
 
     # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.StableDiffusionPipeline.enable_vae_slicing
     def enable_vae_slicing(self):
@@ -863,8 +872,6 @@ class StableDiffusionXLPipeline(
             `tuple`. When returning a tuple, the first element is a list with the generated images.
         """
 
-        self.possibly_reinitialise_tensorrt(width, height)
-
         callback = kwargs.pop("callback", None)
         callback_steps = kwargs.pop("callback_steps", None)
 
@@ -917,6 +924,8 @@ class StableDiffusionXLPipeline(
             batch_size = len(prompt)
         else:
             batch_size = prompt_embeds.shape[0]
+
+        self.possibly_reinitialise_tensorrt(width, height, batch_size)
 
         device = self._execution_device
 
@@ -1062,20 +1071,20 @@ class StableDiffusionXLPipeline(
                 progress_bar.update()
 
         if output_type == "latent":
-            image = latents
+            images = latents
         else:
-            image = self.vae_runner.run(latents)
+            images = self.vae_runner.run(latents)
 
             # apply watermark if available
             if self.watermark is not None:
-                image = self.watermark.apply_watermark(image)
+                images = self.watermark.apply_watermark(images)
 
-            image = self.image_processor.postprocess(image, output_type=output_type)
+            images = self.image_processor.postprocess(images, output_type=output_type)
 
         # Offload all models
         self.maybe_free_model_hooks()
 
         if not return_dict:
-            return (image,)
+            return (images,)
 
-        return StableDiffusionXLPipelineOutput(images=image)
+        return StableDiffusionXLPipelineOutput(images=images)
