@@ -1093,6 +1093,7 @@ def main(args):
                 bsz = model_input.shape[0]
                 # Sample a random timestep for each image
                 sigma = edm_sampling(bsz).to(device=model_input.device)
+                sigma = append_dims(sigma, noise.ndim)
                 # timesteps = torch.randint(
                 #     0, noise_scheduler.config.num_train_timesteps, (bsz,), device=model_input.device
                 # )
@@ -1101,11 +1102,11 @@ def main(args):
                 # Add noise to the model input according to the noise magnitude at each timestep
                 # (this is the forward diffusion process)
                 # noisy_model_input = noise_scheduler.add_noise(model_input, noise, timesteps)
-                noisy_model_input = model_input + noise * append_dims(sigma, noise.ndim)
+                noisy_model_input = model_input + noise * sigma
 
                 c_skip, c_out, c_in, c_noise = edm_scaling(sigma)
                 noise_scheduler.is_scale_input_called = True
-                noisy_model_input = noisy_model_input * append_dims(c_in, noise.ndim)
+                noisy_model_input = noisy_model_input * c_in
 
                 # time ids
                 def compute_time_ids(original_size, crops_coords_top_left):
@@ -1131,13 +1132,13 @@ def main(args):
                 unet_added_conditions.update({"text_embeds": pooled_prompt_embeds})
                 model_pred = unet(
                     noisy_model_input,
-                    c_noise,
+                    c_noise.squeeze(),
                     prompt_embeds,
                     added_cond_kwargs=unet_added_conditions,
                     return_dict=False,
                 )[0]
 
-                model_pred = model_pred * append_dims(c_out, model_pred.ndim) + noisy_model_input * append_dims(c_skip, model_pred.ndim)
+                model_pred = model_pred * c_out + noisy_model_input * c_skip
 
                 # Get the target for loss depending on the prediction type
                 if args.prediction_type is not None:
@@ -1155,8 +1156,10 @@ def main(args):
 
                 if args.snr_gamma is None:
                     # loss = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
-                    loss_weight = append_dims(edm_weighting(sigma), model_pred.ndim)
-                    loss = torch.mean((loss_weight * (model_pred.float() - target) ** 2).reshape(target.shape[0], -1), 1)
+                    # loss_weight = edm_weighting(sigma)
+                    loss_weight = 1
+                    loss = torch.mean((loss_weight * (model_pred.float() - target.float()) ** 2).reshape(target.shape[0], -1), 1)
+                    loss = loss.mean()
                 else:
                     # Compute loss-weights as per Section 3.4 of https://arxiv.org/abs/2303.09556.
                     # Since we predict the noise instead of x_0, the original formulation is slightly changed.
