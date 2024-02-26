@@ -1150,13 +1150,13 @@ def main(args):
                 elif noise_scheduler.config.prediction_type == "v_prediction":
                     target = noise_scheduler.get_velocity(model_input, noise, timesteps)
                 elif noise_scheduler.config.prediction_type == "sample":
-                    target = noise
+                    target = model_input
                 else:
                     raise ValueError(f"Unknown prediction type {noise_scheduler.config.prediction_type}")
 
                 if args.snr_gamma is None:
                     # loss = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
-                    # loss_weight = edm_weighting(sigma)
+                    loss_weight = edm_weighting(sigma)
                     loss_weight = 1
                     loss = torch.mean((loss_weight * (model_pred.float() - target.float()) ** 2).reshape(target.shape[0], -1), 1)
                     loss = loss.mean()
@@ -1230,14 +1230,13 @@ def main(args):
 
         if accelerator.is_main_process:
             if args.validation_prompt is not None and epoch % args.validation_epochs == 0:
-                logger.info(
-                    f"Running validation... \n Generating {args.num_validation_images} images with prompt:"
-                    f" {args.validation_prompt}."
-                )
+                logger.info("Running validation...")
+                logger.info("Generating {args.num_validation_images} images with prompt: {args.validation_prompt}.")
+
                 # create pipeline
                 pipeline = PlaygroundV2dot5Pipeline.from_pretrained(
                     args.pretrained_model_name_or_path,
-                    vae=vae,
+                    vae=unwrap_model(vae),
                     text_encoder=unwrap_model(text_encoder_one),
                     text_encoder_2=unwrap_model(text_encoder_two),
                     unet=unwrap_model(unet),
@@ -1253,11 +1252,11 @@ def main(args):
                 generator = torch.Generator(device=accelerator.device).manual_seed(args.seed) if args.seed else None
                 pipeline_args = {"prompt": args.validation_prompt}
 
-                with torch.cuda.amp.autocast():
-                    images = [
-                        pipeline(**pipeline_args, generator=generator).images[0]
-                        for _ in range(args.num_validation_images)
-                    ]
+                # with torch.cuda.amp.autocast():
+                images = [
+                    pipeline(**pipeline_args, generator=generator).images[0]
+                    for _ in range(args.num_validation_images)
+                ]
 
                 for tracker in accelerator.trackers:
                     if tracker.name == "tensorboard":
