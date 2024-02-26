@@ -503,6 +503,22 @@ class EDMSampling:
         return log_sigma.exp()
 
 
+class EDMWeighting:
+    def __init__(self, sigma_data=0.5):
+        self.sigma_data = sigma_data
+
+    def __call__(self, sigma):
+        return (sigma**2 + self.sigma_data**2) / (sigma * self.sigma_data) ** 2
+
+
+def append_dims(x, target_dims):
+    """Appends dimensions to the end of a tensor until it has target_dims dimensions."""
+    dims_to_append = target_dims - x.ndim
+    if dims_to_append < 0:
+        raise ValueError(f"input has {x.ndim} dims but target_dims is {target_dims}, which is less")
+    return x[(...,) + (None,) * dims_to_append]
+
+
 def main(args):
     if args.report_to == "wandb" and args.hub_token is not None:
         raise ValueError(
@@ -1025,6 +1041,7 @@ def main(args):
 
     edm_scaling = EDMScaling()
     edm_sampling = EDMSampling()
+    edm_weighting = EDMWeighting()
 
     progress_bar = tqdm(
         range(0, args.max_train_steps),
@@ -1084,11 +1101,11 @@ def main(args):
                 # Add noise to the model input according to the noise magnitude at each timestep
                 # (this is the forward diffusion process)
                 # noisy_model_input = noise_scheduler.add_noise(model_input, noise, timesteps)
-                noisy_model_input = model_input + noise * sigma
+                noisy_model_input = model_input + noise * append_dims(sigma, noise.ndim)
 
                 c_skip, c_out, c_in, c_noise = edm_scaling(sigma)
                 noise_scheduler.is_scale_input_called = True
-                noisy_model_input = noisy_model_input * c_in
+                noisy_model_input = noisy_model_input * append_dims(c_in, noise.ndim)
 
                 # time ids
                 def compute_time_ids(original_size, crops_coords_top_left):
@@ -1120,7 +1137,7 @@ def main(args):
                     return_dict=False,
                 )[0]
 
-                model_pred = model_pred * c_out + noisy_model_input * c_skip
+                model_pred = model_pred * append_dims(c_out, model_pred.ndim) + noisy_model_input * append_dims(c_skip, model_pred.ndim)
 
                 # Get the target for loss depending on the prediction type
                 if args.prediction_type is not None:
@@ -1137,7 +1154,9 @@ def main(args):
                     raise ValueError(f"Unknown prediction type {noise_scheduler.config.prediction_type}")
 
                 if args.snr_gamma is None:
-                    loss = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
+                    # loss = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
+                    loss_weight = append_dims(edm_weighting(sigma), model_pred.ndim)
+                    loss = torch.mean((loss_weight * (model_pred.float() - target) ** 2).reshape(target.shape[0], -1), 1)
                 else:
                     # Compute loss-weights as per Section 3.4 of https://arxiv.org/abs/2303.09556.
                     # Since we predict the noise instead of x_0, the original formulation is slightly changed.

@@ -51,23 +51,25 @@
 
 #!/bin/bash
 
+export PYTHONPATH="/root/playground/diffusers/src:$PYTHONPATH"
+
 export PROGRAM=(train_text_to_image_lora_sdxl.py \
     --pretrained_model_name_or_path "playgroundai/playground-v2.5-1024px-aesthetic" \
     --pretrained_vae_model_name_or_path=madebyollin/sdxl-vae-fp16-fix \
-    --learning_rate=1e-6 \
+    --learning_rate=2e-5 \
     --rank 128 \
     --num_train_epochs=150 \
     --validation_epochs=10 \
     --checkpointing_steps=100 \
     --mixed_precision='fp16' \
-    --train_batch_size=1 \
-    --num_validation_images 1 \
+    --train_batch_size=2 \
+    --num_validation_images 4 \
     --train_data_dir='./sculpture' \
     --image_column=image \
     --caption_column=text \
     --report_to=wandb \
     --lr_scheduler=constant_with_warmup \
-    --dataloader_num_workers=16 \
+    --dataloader_num_workers=4 \
     --validation_prompt='sculpture style, a cute bunny' \
     --output_dir ./output/sd-model-finetuned-lora \
     )
