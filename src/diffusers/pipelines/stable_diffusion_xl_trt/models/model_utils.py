@@ -202,7 +202,7 @@ class BaseModel:
         self.min_batch = 1
         self.max_batch = max_batch_size
         self.min_image_shape = 256   # min image resolution: 256x256
-        self.max_image_shape = 1024  # max image resolution: 1024x1024
+        self.max_image_shape = 1280  # max image resolution: 1280x1280
         self.min_latent_shape = self.min_image_shape // 8
         self.max_latent_shape = self.max_image_shape // 8
 
