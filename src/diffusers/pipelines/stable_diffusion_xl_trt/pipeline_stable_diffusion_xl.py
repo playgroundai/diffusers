@@ -171,6 +171,7 @@ class StableDiffusionXLPipeline(
         optimized_model_dir: Optional[str] = None,
         version: Optional[str] = 'xl-1.0',
         pipeline_type: PIPELINE_TYPE = PIPELINE_TYPE.SD_XL_BASE,
+        max_batchsize: int = 1,
     ):
         super().__init__()
 
@@ -202,13 +203,14 @@ class StableDiffusionXLPipeline(
         stream = torch.cuda.current_stream().cuda_stream
         clip_runner = CLIPRunner(framework_model_dir=self.optimized_model_dir, output_hidden_states=True,
                                  version=version, pipeline_type=pipeline_type, stream=stream)
-        clip_obj = clip_runner.make_clip()
-        self.base_clip_engine = clip_runner.load_engine(clip_obj, batch_size=1)
+        self.clip_obj = clip_runner.make_clip()
+        self.base_clip_engine = clip_runner.load_engine(self.clip_obj, batch_size=1)
 
         clip2_runner = CLIP2Runner(framework_model_dir=self.optimized_model_dir, output_hidden_states=True,
-                                   version=version, pipeline_type=pipeline_type, stream=stream)
-        clip2_obj = clip2_runner.make_clip_with_proj()
-        self.base_clip2_engine = clip2_runner.load_engine(clip2_obj, batch_size=1)
+                                   version=version, pipeline_type=pipeline_type, stream=stream,
+                                   max_batchsize=max_batchsize)
+        self.clip2_obj = clip2_runner.make_clip_with_proj()
+        self.base_clip2_engine = clip2_runner.load_engine(self.clip2_obj, batch_size=1)
 
         self.unetxl_runner = UNETXLRunnerInfer(framework_model_dir=self.optimized_model_dir, version=version,
                                                scheduler=None, pipeline_type=pipeline_type, stream=stream)
@@ -217,6 +219,7 @@ class StableDiffusionXLPipeline(
         # The width/height for which the TRT modules are initialised
         self.trt_width = None
         self.trt_height = None
+        self.trt_batch = None
 
         self.vae_runner = ImageOnlyVaeRunner(self.vae)
         self.vae_runner.setup_model()
@@ -225,24 +228,28 @@ class StableDiffusionXLPipeline(
 
         # Complete warmups - should only be necessary to warmup with max img sizes
         # TODO check this is the case
-        clip_runner.warmup(self.base_clip_engine, clip_obj)
-        clip2_runner.warmup(self.base_clip2_engine, clip2_obj)
+        clip_runner.warmup(self.base_clip_engine, self.clip_obj)
+        clip2_runner.warmup(self.base_clip2_engine, self.clip2_obj)
         self.unetxl_runner.warmup(self.base_unetxl_engine, 1024, 1024)
-        self.vae_runner.warmup(1024, 1024, batch_size=1)
+        self.vae_runner.warmup(1024, 1024)
         torch.cuda.synchronize() # Wait for warmup nonsense to finish.
 
     # Reinitialise the TRT modules to operate on the given width/height, if needed.
     # This operation is very expensive, but less expensive than completely recreating the pipeline. If you have a
     # workload that's mostly images of the same size with the occasional outlier, then exploiting this functionality
     # might be beneficial.
-    def possibly_reinitialise_tensorrt(self, w, h):
-        if self.trt_width == w and self.trt_height == h:
+    def possibly_reinitialise_tensorrt(self, w, h, bs):
+        if self.trt_width == w and self.trt_height == h and self.trt_batch == bs:
             return
 
         self.trt_height = h
         self.trt_width = w
+        self.trt_batch = bs
 
-        self.base_unetxl_engine.allocate_buffers(shape_dict=self.unetxl_runner.get_shape_dict(h, w), device="cuda")
+        self.base_clip_engine.allocate_buffers(shape_dict=self.clip_obj.get_shape_dict(bs, h, w), device=self.device)
+        self.base_clip2_engine.allocate_buffers(shape_dict=self.clip2_obj.get_shape_dict(bs, h, w), device=self.device)
+        self.base_unetxl_engine.allocate_buffers(shape_dict=self.unetxl_runner.get_shape_dict(h, w, bs),
+                                                 device=self.device)
 
     # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.StableDiffusionPipeline.enable_vae_slicing
     def enable_vae_slicing(self):
@@ -930,6 +937,8 @@ class StableDiffusionXLPipeline(
         else:
             batch_size = prompt_embeds.shape[0]
 
+        self.possibly_reinitialise_tensorrt(width, height, batch_size)
+
         device = self._execution_device
 
         # 3. Encode input prompt
@@ -1060,14 +1069,15 @@ class StableDiffusionXLPipeline(
             with self.progress_bar(total=num_inference_steps) as progress_bar:
                 for i, t in enumerate(timesteps):
                     # expand the latents if we are doing classifier free guidance
-                    latents = torch.cat([latents] * 2) if self.do_classifier_free_guidance else latents
+                    latents_prepped_for_cfg = torch.cat([latents] * 2) if self.do_classifier_free_guidance else latents
 
                     if use_edm:
                         c_skip, c_out, c_in, c_noise = edm_scaling(t)  # t is sigma here
-                        latent_model_input = latents * c_in
+                        self.scheduler.is_scale_input_called = True
+                        latent_model_input = latents_prepped_for_cfg * c_in
                         timestep_input = c_noise
                     else:
-                        latent_model_input = self.scheduler.scale_model_input(latents, t)
+                        latent_model_input = self.scheduler.scale_model_input(latents_prepped_for_cfg, t)
                         timestep_input = t
 
                     # predict the noise residual
@@ -1080,7 +1090,7 @@ class StableDiffusionXLPipeline(
                     noise_pred = self.base_unetxl_engine.infer_using_graph(stream)["latent"]
 
                     if use_edm:
-                        noise_pred = noise_pred * c_out + latent_model_input * c_skip
+                        noise_pred = noise_pred * c_out + latents_prepped_for_cfg * c_skip
 
                     # perform guidance
                     if self.do_classifier_free_guidance:
@@ -1097,7 +1107,7 @@ class StableDiffusionXLPipeline(
                     progress_bar.update()
 
             if output_type == "latent":
-                image = latents
+                images = latents
             else:
                 if use_edm:
                     # XXXPGv2.5: use the EDM scale values from https://arxiv.org/abs/2206.00364 to decode VAE latents
@@ -1106,20 +1116,20 @@ class StableDiffusionXLPipeline(
                     edm_std = torch.tensor(self.vae.config.edm_std).view(
                         1, 4, 1, 1).to(latents.device, dtype=latents.dtype)
                     latents_denorm = latents * edm_std / self.vae.config.edm_scale + edm_mean
-                    image = self.vae_runner.run(latents_denorm, latents_already_scaled=True)
+                    images = self.vae_runner.run(latents_denorm, latents_already_scaled=True)
                 else:
-                    image = self.vae_runner.run(latents, latents_already_scaled=False)
+                    images = self.vae_runner.run(latents, latents_already_scaled=False)
 
                 # apply watermark if available
                 if self.watermark is not None:
-                    image = self.watermark.apply_watermark(image)
+                    images = self.watermark.apply_watermark(images)
 
-                image = self.image_processor.postprocess(image, output_type=output_type)
+                images = self.image_processor.postprocess(images, output_type=output_type)
 
             # Offload all models
             self.maybe_free_model_hooks()
 
             if not return_dict:
-                return (image,)
+                return (images,)
 
-            return StableDiffusionXLPipelineOutput(images=image)
+            return StableDiffusionXLPipelineOutput(images=images)
